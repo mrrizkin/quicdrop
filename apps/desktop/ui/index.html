@@ -7,128 +7,147 @@
     <link rel="stylesheet" href="style.css" />
   </head>
   <body>
+    <svg class="sprite" aria-hidden="true">
+      <symbol id="i-laptop" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M2 20h20"/></symbol>
+      <symbol id="i-phone" viewBox="0 0 24 24"><rect x="6" y="2" width="12" height="20" rx="2"/><path d="M12 18h.01"/></symbol>
+      <symbol id="i-monitor" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></symbol>
+      <symbol id="i-upload" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/></symbol>
+      <symbol id="i-download" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></symbol>
+      <symbol id="i-folder" viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></symbol>
+      <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></symbol>
+      <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></symbol>
+      <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+      <symbol id="i-moon" viewBox="0 0 24 24"><path d="M21 12.8A8.5 8.5 0 1 1 11.2 3a6.5 6.5 0 0 0 9.8 9.8z"/></symbol>
+      <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/></symbol>
+      <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></symbol>
+      <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></symbol>
+      <symbol id="i-alert" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/></symbol>
+      <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></symbol>
+      <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></symbol>
+      <symbol id="i-inbox" viewBox="0 0 24 24"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.5 5.1L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.5-6.9A2 2 0 0 0 16.7 4H7.3a2 2 0 0 0-1.8 1.1z"/></symbol>
+      <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></symbol>
+    </svg>
+
     <div class="drop-overlay" id="drop-overlay">
       <div class="drop-card">
-        <div class="drop-icon">⇣</div>
-        <h2>Drop to send</h2>
-        <p id="drop-target">Select a device first</p>
+        <svg class="i big"><use href="#i-download"/></svg>
+        <span id="drop-target">Send</span>
       </div>
     </div>
 
     <div class="app">
       <aside class="sidebar">
         <div class="brand">
-          <div class="logo">Q</div>
-          <div class="brand-text">
-            <h1>QuicDrop</h1>
-            <span>QUIC · local network</span>
-          </div>
-          <button class="ghost icon-only" id="btn-theme" title="Toggle light / dark">
-            <span class="theme-glyph">◐</span>
+          <span class="mark">Q</span>
+          <span class="brand-name">QuicDrop</span>
+          <button class="icon-btn" id="btn-theme" title="Toggle theme" aria-label="Toggle theme">
+            <svg class="i i-sun"><use href="#i-sun"/></svg>
+            <svg class="i i-moon"><use href="#i-moon"/></svg>
           </button>
         </div>
 
-        <div class="this-device">
-          <div class="avatar self" id="self-avatar">?</div>
-          <div class="self-main">
-            <div class="device-name" id="device-name">starting…</div>
-            <div class="device-id" id="device-id"></div>
+        <div class="self">
+          <span class="avatar" id="self-avatar">?</span>
+          <div class="self-text">
+            <span class="name" id="device-name">starting</span>
+            <span class="id" id="device-id"></span>
           </div>
-          <span class="dot" id="device-dot" title="online"></span>
+          <span class="dot" id="device-dot"></span>
         </div>
 
-        <section class="side-section">
-          <div class="side-head">
-            <h2>Trusted devices</h2>
-            <span class="badge" id="trust-count">0</span>
-          </div>
-          <p class="hint">These can send to you without asking.</p>
-          <ul class="trust-list" id="trust-list"></ul>
-        </section>
+        <div class="cap">Devices <span class="count" id="peer-count">0</span></div>
+        <ul class="list peer-list" id="peer-list"></ul>
+
+        <div class="cap">Trusted <span class="count" id="trust-count">0</span></div>
+        <ul class="list" id="trust-list"></ul>
+
+        <p class="sr-only" id="peers-hint"></p>
 
         <div class="side-foot">
-          <button class="secondary wide" id="btn-settings">Settings</button>
-          <p class="foot-note">Nothing leaves your local network.</p>
+          <button class="icon-btn" id="btn-settings" title="Settings" aria-label="Settings">
+            <svg class="i"><use href="#i-sliders"/></svg>
+          </button>
         </div>
       </aside>
 
       <main class="main">
-        <header class="main-head">
-          <div class="head-text">
-            <h2>Nearby devices</h2>
-            <p class="hint" id="peers-hint">Looking for devices on your network…</p>
-          </div>
-          <div class="main-actions">
-            <span class="badge" id="peer-count">0</span>
-            <button class="secondary" id="btn-send">Send files…</button>
-            <button class="primary" id="btn-send-folder">Send folder…</button>
-          </div>
+        <header class="toolbar">
+          <h1>Transfers</h1>
+          <span class="dim" id="transfer-count"></span>
+          <label class="search">
+            <svg class="i"><use href="#i-search"/></svg>
+            <input id="transfer-search" type="search" placeholder="Filter files" />
+          </label>
+          <button class="icon-btn" id="btn-send" title="Send files" aria-label="Send files" disabled>
+            <svg class="i"><use href="#i-upload"/></svg>
+          </button>
+          <button class="icon-btn" id="btn-send-folder" title="Send folder" aria-label="Send folder" disabled>
+            <svg class="i"><use href="#i-folder"/></svg>
+          </button>
         </header>
 
-        <ul class="peer-grid" id="peer-list"></ul>
-
-        <section class="transfers">
-          <div class="side-head">
-            <h2>Transfers</h2>
-            <input class="search" id="transfer-search" type="search" placeholder="Filter files" />
-            <span class="hint inline" id="transfer-count"></span>
-          </div>
-          <ul class="transfer-list" id="transfer-list">
-            <li class="empty">Nothing transferred yet.</li>
-          </ul>
-        </section>
+        <ul class="transfers" id="transfer-list">
+          <li class="empty">Nothing transferred yet.</li>
+        </ul>
       </main>
     </div>
 
     <div class="modal-backdrop" id="approval-modal" hidden>
       <div class="modal approval">
-        <div class="approval-head">
-          <div class="avatar big" id="approval-avatar">?</div>
-          <div class="approval-copy">
-            <h2 id="approval-title">Incoming transfer</h2>
-            <p class="hint" id="approval-sub">wants to send files</p>
+        <div class="modal-head">
+          <span class="avatar" id="approval-avatar">?</span>
+          <div class="modal-title">
+            <strong id="approval-title">Incoming transfer</strong>
+            <span class="dim" id="approval-sub"></span>
           </div>
+          <span class="badge warn">Incoming</span>
         </div>
         <ul class="file-list" id="approval-files"></ul>
-        <p class="approval-dest">
-          Saving to <span id="approval-dest">your download folder</span>
-        </p>
-        <div class="approval-actions">
-          <button class="danger" id="approval-decline">Decline</button>
-          <button class="secondary" id="approval-accept">Accept once</button>
-          <button class="primary" id="approval-always">Always accept</button>
+        <div class="modal-note">
+          <svg class="i"><use href="#i-inbox"/></svg>
+          <span id="approval-dest"></span>
         </div>
-        <p class="modal-foot">Ignoring this request rejects it automatically.</p>
+        <div class="modal-foot">
+          <button class="btn danger" id="approval-decline">Decline</button>
+          <span class="grow"></span>
+          <button class="btn" id="approval-accept">Accept once</button>
+          <button class="btn primary" id="approval-always">Always accept</button>
+        </div>
       </div>
     </div>
 
     <div class="modal-backdrop" id="settings-modal" hidden>
       <div class="modal">
         <div class="modal-head">
-          <h2>Settings</h2>
-          <button class="ghost icon-only" id="settings-close" title="Close">✕</button>
+          <svg class="i"><use href="#i-sliders"/></svg>
+          <div class="modal-title"><strong>Settings</strong></div>
+          <button class="icon-btn" id="settings-close" title="Close" aria-label="Close">
+            <svg class="i"><use href="#i-x"/></svg>
+          </button>
         </div>
-        <label class="field">
-          <span>Save incoming files to</span>
-          <div class="row">
-            <input id="settings-out" type="text" spellcheck="false" />
-            <button class="secondary" id="settings-browse">Browse…</button>
-          </div>
-        </label>
-        <label class="field">
-          <span>New devices</span>
-          <select id="settings-policy">
-            <option value="ask">Ask me every time</option>
-            <option value="auto">Accept automatically</option>
-            <option value="deny">Reject automatically</option>
-          </select>
-        </label>
-        <p class="field-note">
-          Trusted devices are always accepted. Forgetting a device makes it ask again.
-        </p>
-        <div class="row end">
-          <button class="ghost" id="settings-cancel">Cancel</button>
-          <button class="primary" id="settings-save">Save changes</button>
+        <div class="modal-body">
+          <label class="field">
+            <span>Save to</span>
+            <div class="row">
+              <input class="input mono" id="settings-out" type="text" spellcheck="false" />
+              <button class="icon-btn" id="settings-browse" title="Browse" aria-label="Browse">
+                <svg class="i"><use href="#i-folder"/></svg>
+              </button>
+            </div>
+          </label>
+          <label class="field">
+            <span>New devices</span>
+            <select class="input" id="settings-policy">
+              <option value="ask">Ask</option>
+              <option value="auto">Accept</option>
+              <option value="deny">Reject</option>
+            </select>
+          </label>
+        </div>
+        <div class="modal-foot">
+          <button class="btn" id="settings-cancel">Cancel</button>
+          <span class="grow"></span>
+          <button class="btn primary" id="settings-save">Save</button>
         </div>
       </div>
     </div>

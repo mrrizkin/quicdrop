@@ -16,6 +16,14 @@ const state = {
 
 const $ = (id) => document.getElementById(id);
 
+const icon = (name) => `<svg class="i"><use href="#i-${name}"/></svg>`;
+const platformIcon = (platform) =>
+  /android|ios/i.test(platform || "")
+    ? "phone"
+    : /windows|macos|linux/i.test(platform || "")
+      ? "laptop"
+      : "monitor";
+
 
 const esc = (value) =>
   String(value ?? "").replace(/[&<>"']/g, (c) => ({
@@ -247,9 +255,9 @@ function renderPeers() {
             </div>
           </div>
           <div class="peer-foot">
-            <span class="chip">${esc(peer.platform || "unknown")}</span>
-            ${peer.trusted ? '<span class="trusted-tag">trusted</span>' : ""}
-            <button class="peer-send" data-send="${esc(key)}">Send</button>
+            <span class="chip" title="${esc(peer.platform || "unknown")}">${icon(platformIcon(peer.platform))}</span>
+            ${peer.trusted ? `<span title="Trusted">${icon("shield")}</span>` : ""}
+            <button class="icon-btn peer-send" data-send="${esc(key)}" title="Send">${icon("upload")}</button>
           </div>
         </li>`;
     })
@@ -293,7 +301,7 @@ function renderTrust() {
         <div class="avatar" style="--hue:${hueFor(peer.device_id)}">${initial(peer.name)}</div>
         <span class="name" title="${esc(peer.name)}">${esc(peer.name)}</span>
         <span class="when">${timeAgo(peer.last_seen)}</span>
-        <button class="icon-btn" data-forget="${esc(peer.device_id)}" title="Forget device">✕</button>
+        <button class="icon-btn" data-forget="${esc(peer.device_id)}" title="Forget">${icon("trash")}</button>
       </li>`,
     )
     .join("");
@@ -352,12 +360,12 @@ function renderTransfers() {
           ? "no files"
           : files.length === 1
             ? files[0].name
-            : `${files[0].name} +${files.length - 1} more`;
+            : `${files[0].name} +${files.length - 1}`;
 
       const rate = rateFor(transfer);
       const eta = rate > 0 ? fmtEta((total - done) / rate) : "";
       const bits = [
-        `${transfer.direction === "in" ? "from" : "to"} ${esc(transfer.peer_name)}`,
+        esc(transfer.peer_name),
         `${fmtBytes(done)} / ${fmtBytes(total)}`,
         rate > 0 ? fmtRate(rate) : "",
         eta,
@@ -367,11 +375,11 @@ function renderTransfers() {
 
       const cancel =
         transfer.status === "active"
-          ? `<button class="ghost small" data-cancel="${esc(transfer.id)}">Cancel</button>`
+          ? `<button class="icon-btn" data-cancel="${esc(transfer.id)}" title="Cancel">${icon("stop")}</button>`
           : "";
       return `
         <li class="transfer ${esc(transfer.status)}" data-transfer="${esc(transfer.id)}">
-          <div class="dir ${esc(transfer.direction)}">${transfer.direction === "in" ? "↓" : "↑"}</div>
+          <div class="dir ${esc(transfer.direction)}">${icon(transfer.direction === "in" ? "download" : "upload")}</div>
           <div class="t-main">
             <div class="transfer-top">
               <div class="transfer-title" title="${esc(summary)}">${esc(summary)}</div>
@@ -412,8 +420,8 @@ function renderApproval() {
   $("approval-avatar").textContent = initial(approval.peer_name);
   $("approval-avatar").style.setProperty("--hue", hueFor(approval.peer_id));
   $("approval-dest").textContent = state.config.out_dir || "your download folder";
-  $("approval-title").textContent = `"${approval.peer_name}" wants to send`;
-  $("approval-sub").textContent = `${approval.files.length} file(s) · ${fmtBytes(approval.total_bytes)} · ${approval.peer_platform || "unknown platform"}`;
+  $("approval-title").textContent = approval.peer_name;
+  $("approval-sub").textContent = `${approval.files.length} files · ${fmtBytes(approval.total_bytes)}`;
   $("approval-files").innerHTML = approval.files
     .map(
       (file) =>
