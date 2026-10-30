@@ -43,7 +43,20 @@ pub fn transport_config() -> quinn::TransportConfig {
     if let Ok(idle) = quinn::IdleTimeout::try_from(Duration::from_secs(60)) {
         t.max_idle_timeout(Some(idle));
     }
+    if let Some(factory) = congestion_controller() {
+        t.congestion_controller_factory(factory);
+    }
     t
+}
+
+/// Congestion controller override, for comparing against CUBIC on a real link.
+/// `QD_CC=bbr` selects BBR; anything else keeps quinn's default.
+fn congestion_controller() -> Option<Arc<dyn quinn::congestion::ControllerFactory + Send + Sync>> {
+    let choice = std::env::var("QD_CC").ok()?.to_ascii_lowercase();
+    match choice.as_str() {
+        "bbr" => Some(Arc::new(quinn::congestion::BbrConfig::default())),
+        _ => None,
+    }
 }
 
 fn runtime() -> Result<Arc<dyn quinn::Runtime>> {
