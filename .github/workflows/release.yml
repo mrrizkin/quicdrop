@@ -196,6 +196,7 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           cd dist
           # A missing bundle used to surface as an absent download, not a failed build.
+          # The flatpak is attached by its own workflow, so it is not listed here.
           for expected in \
             "quicdrop-$version-linux-x86_64.tar.gz" \
             "quicdrop-$version-windows-x86_64.tar.gz" \
@@ -204,8 +205,7 @@ jobs:
             "quicdrop-desktop-$version-x86_64.rpm" \
             "quicdrop-desktop-$version-amd64.AppImage" \
             "quicdrop-desktop-$version-x64-setup.exe" \
-            "quicdrop-desktop-$version-universal.dmg" \
-            "quicdrop-$version.flatpak"
+            "quicdrop-desktop-$version-universal.dmg"
           do
             if [ ! -f "$expected" ]; then
               echo "missing release asset: $expected" >&2
