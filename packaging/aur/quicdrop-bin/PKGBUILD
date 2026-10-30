@@ -2,7 +2,7 @@
 
 pkgname=quicdrop-bin
 _pkgname=quicdrop
-pkgver=2026.44.9
+pkgver=2026.44.10
 pkgrel=1
 pkgdesc="Peer-to-peer file transfer over QUIC on the local network, prebuilt"
 arch=('x86_64')
@@ -13,25 +13,26 @@ provides=('quicdrop')
 conflicts=('quicdrop' 'quicdrop-git')
 options=('!strip' '!debug')
 makedepends=('libarchive')
+# The desktop bundle carries qd and quicdropd too, so both come from one build.
 source=(
-  "$_pkgname-$pkgver-x86_64.tar.gz::$url/releases/download/v$pkgver/quicdrop-$pkgver-linux-x86_64.tar.gz"
-  "QuicDrop_${pkgver}_amd64.deb::$url/releases/download/v$pkgver/QuicDrop_${pkgver}_amd64.deb"
+  "quicdrop-desktop-$pkgver-amd64.deb::$url/releases/download/v$pkgver/quicdrop-desktop-$pkgver-amd64.deb"
+  "$_pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz"
 )
 sha256sums=(
-  'b83b74f1001257ff6fe1dcef381b5bf2ca5a59790e2156a8805c7653634b9393'
-  'dc6fa7cdb4aa01d149e2b0595b1a282c259a91e3f0f0de1202fd0db7137c55f0'
+  '1f52f37bd1ae4b5f8d72c0e75f2ac37adcd30518e377af214dd3dba04ab19530'
+  'a87b7b09128b59c55116480d29e1ce1c85fa1bbce41487f677b4e774c8bbafe9'
 )
 
 prepare() {
   mkdir -p desktop
-  bsdtar -xf "QuicDrop_${pkgver}_amd64.deb" -C desktop
+  bsdtar -xf "quicdrop-desktop-$pkgver-amd64.deb" -C desktop
   ( cd desktop && bsdtar -xf data.tar.gz && rm -f data.tar.gz control.tar.gz debian-binary )
 }
 
 package() {
-  install -Dm755 "$srcdir/quicdrop-$pkgver-linux-x86_64/qd" "$pkgdir/usr/bin/qd"
-  install -Dm755 "$srcdir/quicdrop-$pkgver-linux-x86_64/quicdropd" "$pkgdir/usr/bin/quicdropd"
-  install -Dm755 "$srcdir/desktop/usr/bin/quicdrop-desktop" "$pkgdir/usr/bin/quicdrop-desktop"
+  for bin in qd quicdropd quicdrop-desktop; do
+    install -Dm755 "$srcdir/desktop/usr/bin/$bin" "$pkgdir/usr/bin/$bin"
+  done
 
   install -Dm644 "$srcdir/desktop/usr/share/applications/QuicDrop.desktop" \
     "$pkgdir/usr/share/applications/QuicDrop.desktop"
@@ -40,6 +41,6 @@ package() {
       "$pkgdir/usr/share/icons/hicolor/$size/apps/quicdrop-desktop.png"
   done
 
-  install -Dm644 "$srcdir/quicdrop-$pkgver-linux-x86_64/LICENSE-MIT" \
+  install -Dm644 "$srcdir/$_pkgname-$pkgver/LICENSE-MIT" \
     "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

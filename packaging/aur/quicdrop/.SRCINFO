@@ -1,6 +1,6 @@
 pkgbase = quicdrop
 	pkgdesc = Peer-to-peer file transfer over QUIC on the local network
-	pkgver = 2026.44.9
+	pkgver = 2026.44.10
 	pkgrel = 1
 	url = https://github.com/mrrizkin/quicdrop
 	arch = x86_64
@@ -15,7 +15,7 @@ pkgbase = quicdrop
 	depends = libsoup3
 	depends = hicolor-icon-theme
 	options = !lto
-	source = quicdrop-2026.44.9.tar.gz::https://github.com/mrrizkin/quicdrop/archive/v2026.44.9.tar.gz
-	sha256sums = a5df7c9b1968484a94ea438679c2f78b090aa7ce0d724eb6f8e22b42cab7c38f
+	source = quicdrop-2026.44.10.tar.gz::https://github.com/mrrizkin/quicdrop/archive/v2026.44.10.tar.gz
+	sha256sums = a87b7b09128b59c55116480d29e1ce1c85fa1bbce41487f677b4e774c8bbafe9
 
 pkgname = quicdrop

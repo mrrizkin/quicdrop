@@ -4,7 +4,7 @@ Two packages, both installable with your favourite AUR helper:
 
 | Directory     | Package        | Source                                              |
 | ------------- | -------------- | --------------------------------------------------- |
-| `quicdrop-bin`| prebuilt       | release assets: the CLI tarball and the `.deb` for the desktop binary |
+| `quicdrop-bin`| prebuilt       | the release `.deb`, which carries the CLI and the desktop binary |
 | `quicdrop`    | source build   | `v<pkgver>` archive from GitHub, built with cargo    |
 
 `quicdrop-bin` installs `qd`, `quicdropd`, `quicdrop-desktop`, the desktop entry and
@@ -37,10 +37,11 @@ updpkgsums                      # rewrites sha256sums from the sources
 makepkg --printsrcinfo > .SRCINFO
 ```
 
-`quicdrop-bin` pulls two assets: `quicdrop-<version>-linux-x86_64.tar.gz` for the
-CLI, and `quicdrop-desktop-<version>-amd64.deb` for the desktop binary and its
-icons. Both file names appear in `source=()`, so check them against the release
-page before trusting `updpkgsums` — it fails to download, not to notice a rename.
+`quicdrop-bin` pulls two assets: `quicdrop-desktop-<version>-amd64.deb`, which
+carries `qd`, `quicdropd`, the desktop binary and its icons, and the source
+archive for the licence text. Both names appear in `source=()`, so check them
+against the release page before trusting `updpkgsums` — it fails to download,
+not to notice a rename.
 
 The `quicdrop` archive checksum comes from
 `https://github.com/<owner>/quicdrop/archive/v<pkgver>.tar.gz`. GitHub has
