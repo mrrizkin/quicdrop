@@ -9,7 +9,8 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::Semaphore;
 use tracing::{debug, info};
 
-use crate::progress::{Progress, ProgressSink};
+use crate::cancel::Cancel;
+use crate::progress::{FileSink, Progress, ProgressSink};
 use crate::proto::{self, AcceptFile, FileAck, FileHeader, FileMeta, FileTrailer, Frame};
 use crate::util::{human_bytes, human_rate};
 
@@ -25,6 +26,10 @@ pub struct SendOpts {
     pub name: Option<String>,
     /// Optional live progress observer for embedders.
     pub progress: Option<ProgressSink>,
+    /// Optional per-file progress observer, keyed by `FileMeta::id`.
+    pub file_progress: Option<FileSink>,
+    /// Abort the transfer when signalled.
+    pub cancel: Option<Cancel>,
 }
 
 impl std::fmt::Debug for SendOpts {
@@ -36,6 +41,8 @@ impl std::fmt::Debug for SendOpts {
             .field("concurrency", &self.concurrency)
             .field("name", &self.name)
             .field("progress", &self.progress.is_some())
+            .field("file_progress", &self.file_progress.is_some())
+            .field("cancel", &self.cancel.is_some())
             .finish()
     }
 }
@@ -97,6 +104,16 @@ pub async fn send(opts: SendOpts) -> Result<Summary> {
     debug!("connected to {} in one RTT", conn.remote_address());
 
     let session = new_session_id();
+    let watcher = opts.cancel.as_ref().map(|flag| {
+        let conn = conn.clone();
+        let flag = flag.clone();
+        tokio::spawn(async move {
+            while !flag.is_cancelled() {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            conn.close(0u32.into(), b"cancelled");
+        })
+    });
     let identity = crate::identity::Identity::load_or_create(opts.name.clone())?;
     let (mut ctrl_send, mut ctrl_recv) = conn.open_bi().await.context("open control stream")?;
     proto::write_frame(
@@ -173,11 +190,20 @@ pub async fn send(opts: SendOpts) -> Result<Summary> {
         let meta = metas[item.id as usize].clone();
         let conn = conn.clone();
         let progress = progress.clone();
+        let file_progress = opts.file_progress.clone();
         let permit = semaphore.clone();
         tasks.push(tokio::spawn(async move {
             let _permit = permit.acquire_owned().await;
-            let result =
-                send_one(&conn, session, &path, &meta, item.offset, progress.clone()).await;
+            let result = send_one(
+                &conn,
+                session,
+                &path,
+                &meta,
+                item.offset,
+                progress.clone(),
+                file_progress.clone(),
+            )
+            .await;
             (meta, item.offset, result)
         }));
     }
@@ -213,6 +239,13 @@ pub async fn send(opts: SendOpts) -> Result<Summary> {
     }
 
     reporter_handle.abort();
+    if let Some(watcher) = watcher {
+        watcher.abort();
+    }
+    if opts.cancel.as_ref().is_some_and(|c| c.is_cancelled()) {
+        endpoint.wait_idle().await;
+        bail!("cancelled");
+    }
     let _ = proto::write_frame(&mut ctrl_send, &Frame::Bye).await;
     let _ = ctrl_send.finish();
 
@@ -243,6 +276,7 @@ async fn send_one(
     meta: &FileMeta,
     offset: u64,
     progress: Arc<Progress>,
+    file_progress: Option<FileSink>,
 ) -> Result<u64> {
     let started = Instant::now();
     let (mut send, mut recv) = conn.open_bi().await.context("open file stream")?;
@@ -279,6 +313,9 @@ async fn send_one(
             send.write_all(slice).await.context("write file chunk")?;
             sent += slice.len() as u64;
             progress.add(slice.len() as u64);
+            if let Some(sink) = &file_progress {
+                sink(meta.id, pos + n as u64, meta.size);
+            }
         }
         pos = chunk_end;
     }

@@ -1214,3 +1214,95 @@ select:focus {
     transition-duration: 0.01ms !important;
   }
 }
+
+.search {
+  flex: 1;
+  min-width: 0;
+  max-width: 220px;
+  padding: 6px 10px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.search::placeholder {
+  color: var(--faint);
+}
+
+.file-rows {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  max-height: 190px;
+  overflow-y: auto;
+  border-top: 1px solid var(--line);
+}
+
+.file-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 52px;
+  grid-template-areas: "name bytes pct" "bar bar bar";
+  row-gap: 3px;
+  align-items: center;
+  padding: 5px 2px;
+  font-size: 12px;
+  color: var(--muted);
+  border-bottom: 1px solid var(--line-soft, var(--line));
+}
+
+.file-row:last-child {
+  border-bottom: 0;
+}
+
+.file-name {
+  grid-area: name;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.file-bytes {
+  grid-area: bytes;
+  font-variant-numeric: tabular-nums;
+  color: var(--faint);
+}
+
+.file-pct {
+  grid-area: pct;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--faint);
+}
+
+.file-bar {
+  grid-area: bar;
+  display: block;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.file-bar > span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+
+.file-more {
+  padding: 6px 2px;
+  font-size: 12px;
+  color: var(--faint);
+}
+
+.status.cancelled {
+  color: var(--warn);
+}
+
+.transfer.cancelled .bar > span {
+  background: var(--warn);
+}

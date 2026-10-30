@@ -81,12 +81,16 @@ pub enum TransferStatus {
     Done,
     Failed,
     Declined,
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileView {
     pub name: String,
     pub size: u64,
+    #[serde(default)]
+    pub done: u64,
+    pub ok: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -163,6 +167,11 @@ pub enum DaemonEvent {
         transferred: u64,
         total: u64,
     },
+    File {
+        id: String,
+        index: usize,
+        file: FileView,
+    },
     Approval {
         request: ApprovalView,
     },
@@ -194,6 +203,8 @@ pub struct Inner {
     peers: Mutex<HashMap<String, PeerView>>,
     transfers: Mutex<Vec<TransferView>>,
     inbound: Mutex<HashMap<String, String>>,
+    cancels: Mutex<HashMap<String, qd_core::Cancel>>,
+    conns: Mutex<HashMap<String, qd_core::quinn::Connection>>,
     approvals: Mutex<HashMap<String, (ApprovalView, oneshot::Sender<Decision>)>>,
     events: broadcast::Sender<DaemonEvent>,
     next_id: AtomicU64,
@@ -331,8 +342,13 @@ impl Inner {
             let Some(transfer) = transfers.iter_mut().find(|t| t.id == id) else {
                 return;
             };
-            transfer.status = status;
-            transfer.error = error;
+            // A cancelled transfer stays cancelled; late events must not revive it.
+            if transfer.status != TransferStatus::Cancelled {
+                transfer.status = status;
+                if error.is_some() {
+                    transfer.error = error;
+                }
+            }
             transfer.finished_at = Some(now_secs());
             transfer.clone()
         };
@@ -341,6 +357,41 @@ impl Inner {
 
     pub fn shutdown_signal(&self) -> bool {
         self.shutdown.send(true).is_ok()
+    }
+
+    fn transfer_id(&self, peer_id: &str) -> Option<String> {
+        self.inbound
+            .lock()
+            .ok()
+            .and_then(|map| map.get(peer_id).cloned())
+    }
+
+    /// Update one file inside a transfer and publish it.
+    pub fn set_file(
+        &self,
+        transfer_id: &str,
+        index: usize,
+        done: Option<u64>,
+        ok: Option<bool>,
+    ) -> Option<FileView> {
+        let file = {
+            let mut transfers = self.transfers.lock().ok()?;
+            let transfer = transfers.iter_mut().find(|t| t.id == transfer_id)?;
+            let file = transfer.files.get_mut(index)?;
+            if let Some(done) = done {
+                file.done = done.min(file.size);
+            }
+            if ok.is_some() {
+                file.ok = ok;
+            }
+            file.clone()
+        };
+        self.broadcast(DaemonEvent::File {
+            id: transfer_id.to_string(),
+            index,
+            file: file.clone(),
+        });
+        Some(file)
     }
 
     fn resolve_approval(&self, id: &str, decision: Decision) -> bool {
@@ -404,6 +455,8 @@ impl Daemon {
             peers: Mutex::new(HashMap::new()),
             transfers: Mutex::new(Vec::new()),
             inbound: Mutex::new(HashMap::new()),
+            cancels: Mutex::new(HashMap::new()),
+            conns: Mutex::new(HashMap::new()),
             approvals: Mutex::new(HashMap::new()),
             events,
             next_id: AtomicU64::new(1),
@@ -572,17 +625,23 @@ fn server_event_sink(inner: Arc<Inner>) -> ServerEventSink {
             peer_name,
             files,
             total_bytes,
+            conn,
         } => {
             let files = files
                 .into_iter()
                 .map(|f| FileView {
                     name: f.name,
                     size: f.size,
+                    done: 0,
+                    ok: None,
                 })
                 .collect();
             let id = inner.start_transfer(Direction::In, &peer_id, &peer_name, files, total_bytes);
             if let Ok(mut inbound) = inner.inbound.lock() {
-                inbound.insert(peer_id, id);
+                inbound.insert(peer_id.clone(), id.clone());
+            }
+            if let Ok(mut conns) = inner.conns.lock() {
+                conns.insert(id, conn);
             }
         }
         ServerEvent::Progress {
@@ -599,9 +658,33 @@ fn server_event_sink(inner: Arc<Inner>) -> ServerEventSink {
                 inner.progress(&id, done, total);
             }
         }
+        ServerEvent::FileStart {
+            peer_id,
+            id,
+            name,
+            size,
+        } => {
+            debug!("receiving {name} ({size} bytes) from {peer_id}");
+            if let Some(transfer) = inner.transfer_id(&peer_id) {
+                inner.set_file(&transfer, id as usize, Some(0), None);
+            }
+        }
+        ServerEvent::FileProgress {
+            peer_id,
+            id,
+            name,
+            done,
+            size,
+        } => {
+            let _ = (name, size);
+            if let Some(transfer) = inner.transfer_id(&peer_id) {
+                inner.set_file(&transfer, id as usize, Some(done), None);
+            }
+        }
         ServerEvent::File {
             peer_id,
             name,
+            id,
             bytes,
             ok,
         } => {
@@ -609,6 +692,9 @@ fn server_event_sink(inner: Arc<Inner>) -> ServerEventSink {
                 "received {name} ({bytes} bytes) from {peer_id}: {}",
                 if ok { "ok" } else { "failed" }
             );
+            if let Some(transfer) = inner.transfer_id(&peer_id) {
+                inner.set_file(&transfer, id as usize, None, Some(ok));
+            }
         }
         ServerEvent::Done {
             peer_id,
@@ -621,6 +707,9 @@ fn server_event_sink(inner: Arc<Inner>) -> ServerEventSink {
                 .ok()
                 .and_then(|mut map| map.remove(&peer_id));
             if let Some(id) = id {
+                if let Ok(mut conns) = inner.conns.lock() {
+                    conns.remove(&id);
+                }
                 let status = if failures > 0 {
                     TransferStatus::Failed
                 } else {
@@ -666,6 +755,8 @@ async fn approval_forwarder(
                 .map(|f| FileView {
                     name: f.name.clone(),
                     size: f.size,
+                    done: 0,
+                    ok: None,
                 })
                 .collect(),
             total_bytes: request.total_bytes,
@@ -758,6 +849,8 @@ pub fn file_views(files: &[FileMeta]) -> Vec<FileView> {
         .map(|f| FileView {
             name: f.name.clone(),
             size: f.size,
+            done: 0,
+            ok: None,
         })
         .collect()
 }
@@ -770,20 +863,20 @@ pub fn spawn_send(
     concurrency: usize,
     timeout: Duration,
 ) -> String {
-    let files: Vec<FileView> = paths
-        .iter()
-        .map(|path| {
-            let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-            FileView {
-                name: path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("file")
-                    .to_string(),
-                size,
-            }
+    // Expand once so the transfer list shows real files, with real sizes.
+    let files: Vec<FileView> = qd_core::source::expand(&paths)
+        .map(|sources| {
+            sources
+                .into_iter()
+                .map(|f| FileView {
+                    name: f.name,
+                    size: f.size,
+                    done: 0,
+                    ok: None,
+                })
+                .collect()
         })
-        .collect();
+        .unwrap_or_default();
     let total: u64 = files.iter().map(|f| f.size).sum();
     let id = inner.start_transfer(Direction::Out, &to, &to, files, total);
 
@@ -809,6 +902,16 @@ pub fn spawn_send(
             sink_state.progress(&sink_id, done, total);
         });
 
+        let cancel = qd_core::Cancel::new();
+        if let Ok(mut cancels) = state.cancels.lock() {
+            cancels.insert(transfer_id.clone(), cancel.clone());
+        }
+        let file_state = state.clone();
+        let file_id = transfer_id.clone();
+        let file_progress: qd_core::FileSink = Arc::new(move |id, done, _| {
+            file_state.set_file(&file_id, id as usize, Some(done), None);
+        });
+
         let opts = SendOpts {
             addr,
             device_id,
@@ -817,11 +920,15 @@ pub fn spawn_send(
             quiet: true,
             name: Some(state.identity.name.clone()),
             progress: Some(progress),
+            file_progress: Some(file_progress),
+            cancel: Some(cancel.clone()),
         };
         debug!("sending to {label} at {addr}");
         match client::send(opts).await {
             Ok(summary) => {
-                let status = if summary.failed > 0 {
+                let status = if cancel.is_cancelled() {
+                    TransferStatus::Cancelled
+                } else if summary.failed > 0 {
                     TransferStatus::Failed
                 } else {
                     TransferStatus::Done
@@ -841,8 +948,16 @@ pub fn spawn_send(
                 );
             }
             Err(e) => {
-                state.finish_transfer(&transfer_id, TransferStatus::Failed, Some(format!("{e:#}")));
+                let status = if cancel.is_cancelled() {
+                    TransferStatus::Cancelled
+                } else {
+                    TransferStatus::Failed
+                };
+                state.finish_transfer(&transfer_id, status, Some(format!("{e:#}")));
             }
+        }
+        if let Ok(mut cancels) = state.cancels.lock() {
+            cancels.remove(&transfer_id);
         }
     });
 

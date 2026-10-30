@@ -176,6 +176,8 @@ async fn main() -> Result<()> {
                 quiet: cli.quiet,
                 name: cli.name,
                 progress: None,
+                file_progress: None,
+                cancel: None,
             };
             let summary = qd_core::client::send(summary).await?;
             if summary.failed > 0 {

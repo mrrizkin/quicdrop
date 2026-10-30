@@ -60,6 +60,8 @@ impl Harness {
             quiet: true,
             name: None,
             progress: None,
+            file_progress: None,
+            cancel: None,
         };
         timeout(Duration::from_secs(20), client::send(opts)).await?
     }

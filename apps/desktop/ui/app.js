@@ -10,6 +10,7 @@ const state = {
   approvals: [],
   trust: [],
   config: { out_dir: "", policy: "ask" },
+  fileQuery: "",
   selectedPeer: null,
 };
 
@@ -301,6 +302,31 @@ function renderTrust() {
   });
 }
 
+function fileRows(files) {
+  const query = state.fileQuery.trim().toLowerCase();
+  const shown = files
+    .map((file, index) => ({ file, index }))
+    .filter(({ file }) => !query || file.name.toLowerCase().includes(query));
+  if (files.length === 0) return "";
+  const rows = shown
+    .slice(0, 500)
+    .map(({ file, index }) => {
+      const pct = file.size > 0 ? Math.min(100, Math.round(((file.done || 0) / file.size) * 100)) : 0;
+      const mark = file.ok === true ? "✓" : file.ok === false ? "✕" : "";
+      return `<li class="file-row" title="${esc(file.name)}">
+        <span class="file-name">${esc(file.name)}</span>
+        <span class="file-bytes">${fmtBytes(file.done || 0)} / ${fmtBytes(file.size)}</span>
+        <span class="file-pct">${mark || pct + "%"}</span>
+        <span class="file-bar"><span style="width:${pct}%"></span></span>
+      </li>`;
+    })
+    .join("");
+  const more =
+    shown.length > 500 ? `<li class="file-more">+${shown.length - 500} more</li>` : "";
+  const empty = shown.length === 0 ? `<li class="file-more">No file matches.</li>` : "";
+  return `<ul class="file-rows">${empty}${rows}${more}</ul>`;
+}
+
 function renderTransfers() {
   const list = $("transfer-list");
   const active = state.transfers.filter((t) => t.status === "active").length;
@@ -339,15 +365,21 @@ function renderTransfers() {
       ].filter(Boolean);
       if (transfer.error) bits.push(esc(transfer.error));
 
+      const cancel =
+        transfer.status === "active"
+          ? `<button class="ghost small" data-cancel="${esc(transfer.id)}">Cancel</button>`
+          : "";
       return `
-        <li class="transfer ${esc(transfer.status)}">
+        <li class="transfer ${esc(transfer.status)}" data-transfer="${esc(transfer.id)}">
           <div class="dir ${esc(transfer.direction)}">${transfer.direction === "in" ? "↓" : "↑"}</div>
           <div class="t-main">
             <div class="transfer-top">
               <div class="transfer-title" title="${esc(summary)}">${esc(summary)}</div>
+              ${cancel}
             </div>
             <div class="transfer-sub">${bits.join(" · ")}</div>
             <div class="bar"><span style="width:${pct}%"></span></div>
+            ${fileRows(files)}
           </div>
           <div class="t-side">
             <span class="status ${esc(transfer.status)}">${esc(transfer.status)}</span>
@@ -356,6 +388,18 @@ function renderTransfers() {
         </li>`;
     })
     .join("");
+  list.querySelectorAll("[data-cancel]").forEach((button) => {
+    button.addEventListener("click", () => cancelTransfer(button.dataset.cancel));
+  });
+}
+
+async function cancelTransfer(id) {
+  try {
+    await api("POST", `/api/transfers/${encodeURIComponent(id)}/cancel`);
+    toast("Transfer cancelled. Sending the same files again resumes it.");
+  } catch (error) {
+    toast(`Could not cancel: ${error}`);
+  }
 }
 
 function renderApproval() {
@@ -481,6 +525,10 @@ async function saveSettings() {
 $("btn-theme").addEventListener("click", toggleTheme);
 $("settings-close").addEventListener("click", () => ($("settings-modal").hidden = true));
 $("btn-send").addEventListener("click", sendToSelected);
+$("transfer-search").addEventListener("input", (event) => {
+  state.fileQuery = event.target.value;
+  renderTransfers();
+});
 $("btn-send-folder").addEventListener("click", sendFolderToSelected);
 $("btn-settings").addEventListener("click", openSettings);
 $("settings-cancel").addEventListener("click", () => ($("settings-modal").hidden = true));
@@ -523,6 +571,14 @@ async function handleEvent(payload) {
       upsertTransfer(payload.transfer);
       renderTransfers();
       break;
+    case "file": {
+      const transfer = state.transfers.find((t) => t.id === payload.id);
+      if (transfer && transfer.files[payload.index]) {
+        transfer.files[payload.index] = payload.file;
+        renderTransfers();
+      }
+      break;
+    }
     case "progress": {
       const transfer = state.transfers.find((t) => t.id === payload.id);
       if (transfer) {

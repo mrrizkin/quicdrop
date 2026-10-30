@@ -12,6 +12,9 @@ use crate::util::{human_bytes, human_rate};
 /// Throttled to ~10 updates per second (plus one final update) so a GUI is not flooded.
 pub type ProgressSink = Arc<dyn Fn(u64, u64) + Send + Sync>;
 
+/// Per-file observer: `(file id, bytes done, file size)`.
+pub type FileSink = Arc<dyn Fn(u32, u64, u64) + Send + Sync>;
+
 /// Shared byte counter plus a live progress line on stderr.
 pub struct Progress {
     total: u64,

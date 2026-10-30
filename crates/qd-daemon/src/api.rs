@@ -26,6 +26,7 @@ pub fn router(inner: Arc<Inner>) -> Router {
         .route("/api/status", get(status))
         .route("/api/peers", get(peers))
         .route("/api/transfers", get(transfers))
+        .route("/api/transfers/{id}/cancel", post(cancel_transfer))
         .route("/api/approvals", get(approvals))
         .route("/api/approvals/{id}", post(respond_approval))
         .route("/api/trust", get(trust_list).post(trust_add))
@@ -282,6 +283,22 @@ async fn send(
     Ok(Json(json!({ "id": id })))
 }
 
+async fn cancel_transfer(
+    State(inner): State<Arc<Inner>>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    if let Some(cancel) = inner.cancels.lock().ok().and_then(|m| m.get(&id).cloned()) {
+        cancel.cancel();
+        return Ok(Json(json!({ "ok": true })));
+    }
+    if let Some(conn) = inner.conns.lock().ok().and_then(|m| m.get(&id).cloned()) {
+        conn.close(0u32.into(), b"cancelled");
+        inner.finish_transfer(&id, TransferStatus::Cancelled, None);
+        return Ok(Json(json!({ "ok": true })));
+    }
+    Err(not_found(format!("no active transfer {id}")))
+}
+
 async fn config(State(inner): State<Arc<Inner>>) -> Json<Value> {
     Json(json!({
         "out_dir": inner.runtime.out_dir(),
@@ -350,6 +367,7 @@ fn sse(event: &DaemonEvent) -> SseEvent {
         DaemonEvent::Peer { .. } => "peer",
         DaemonEvent::Session { .. } => "session",
         DaemonEvent::Progress { .. } => "progress",
+        DaemonEvent::File { .. } => "file",
         DaemonEvent::Approval { .. } => "approval",
         DaemonEvent::ApprovalResolved { .. } => "approval_resolved",
         DaemonEvent::Trust { .. } => "trust",

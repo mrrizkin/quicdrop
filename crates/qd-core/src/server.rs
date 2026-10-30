@@ -110,14 +110,32 @@ pub enum ServerEvent {
         peer_name: String,
         files: Vec<FileMeta>,
         total_bytes: u64,
+        /// Held so a host can abort this session; cheap to clone.
+        conn: quinn::Connection,
     },
     Progress {
         peer_id: String,
         done: u64,
         total: u64,
     },
+    /// A file stream was planned; `size` is the full file size.
+    FileStart {
+        peer_id: String,
+        id: u32,
+        name: String,
+        size: u64,
+    },
+    /// Bytes written for one file, including a resumed prefix.
+    FileProgress {
+        peer_id: String,
+        id: u32,
+        name: String,
+        done: u64,
+        size: u64,
+    },
     File {
         peer_id: String,
+        id: u32,
         name: String,
         bytes: u64,
         ok: bool,
@@ -474,8 +492,20 @@ async fn handle_connection(
             peer_name: sender_name.clone(),
             files: plan.iter().map(|p| p.meta.clone()).collect(),
             total_bytes: total,
+            conn: conn.clone(),
         },
     );
+    for planned in plan.iter() {
+        emit(
+            &opts,
+            ServerEvent::FileStart {
+                peer_id: sender_id.clone(),
+                id: planned.meta.id,
+                name: planned.label.clone(),
+                size: planned.meta.size,
+            },
+        );
+    }
     let reporter = progress.clone();
     let quiet = opts.quiet;
     let reporter_handle = tokio::spawn(async move { reporter.run(quiet).await });
@@ -484,13 +514,13 @@ async fn handle_connection(
     let mut finished = 0usize;
     let mut transferred = 0u64;
     let mut failures = 0usize;
-    let mut set: JoinSet<Result<(String, u64, bool)>> = JoinSet::new();
+    let mut set: JoinSet<Result<(u32, String, u64, bool)>> = JoinSet::new();
 
     loop {
         tokio::select! {
             joined = set.join_next(), if !set.is_empty() && finished < expected => {
                 match joined {
-                    Some(Ok(Ok((name, bytes, ok)))) => {
+                    Some(Ok(Ok((id, name, bytes, ok)))) => {
                         finished += 1;
                         transferred += bytes;
                         if !ok { failures += 1; }
@@ -500,6 +530,7 @@ async fn handle_connection(
                             &opts,
                             ServerEvent::File {
                                 peer_id: sender_id.clone(),
+                                id,
                                 name,
                                 bytes,
                                 ok,
@@ -527,7 +558,11 @@ async fn handle_connection(
                     Ok((send, recv)) => {
                         let index = index.clone();
                         let progress = progress.clone();
-                        set.spawn(async move { receive_file(send, recv, index, progress).await });
+                        let task_opts = (*opts).clone();
+                        let peer_id = sender_id.clone();
+                        set.spawn(async move {
+                            receive_file(send, recv, index, progress, task_opts, peer_id).await
+                        });
                     }
                     Err(e) => {
                         debug!("no more streams: {e}");
@@ -538,6 +573,10 @@ async fn handle_connection(
         }
     }
 
+    // Streams that never finished are failures, not a clean end.
+    if finished < expected {
+        failures += expected - finished;
+    }
     let _ = proto::write_frame(
         &mut ctrl_send,
         &Frame::Complete {
@@ -655,13 +694,33 @@ async fn receive_file(
     mut recv: quinn::RecvStream,
     index: Arc<HashMap<u32, Arc<PlannedFile>>>,
     progress: Arc<Progress>,
-) -> Result<(String, u64, bool)> {
+    opts: ServerOpts,
+    peer_id: String,
+) -> Result<(u32, String, u64, bool)> {
     let header: FileHeader = proto::read_msg(&mut recv)
         .await
         .context("read file header")?;
     let planned = index.get(&header.id).context("unknown file id")?.clone();
     let expected = planned.meta.size;
     let offset = planned.offset.min(expected);
+    let file_id = planned.meta.id;
+    let file_progress = opts.events.as_ref().map(|sink| {
+        let sink = sink.clone();
+        let peer = peer_id.clone();
+        let name = planned.label.clone();
+        Progress::with_sink(
+            expected.saturating_sub(offset),
+            Arc::new(move |done, _| {
+                sink(ServerEvent::FileProgress {
+                    peer_id: peer.clone(),
+                    id: file_id,
+                    name: name.clone(),
+                    done: offset + done,
+                    size: expected,
+                })
+            }),
+        )
+    });
 
     let mut file = tokio::fs::OpenOptions::new()
         .create(true)
@@ -716,6 +775,9 @@ async fn receive_file(
         hasher.update(&buf[..n]);
         written += n as u64;
         progress.add(n as u64);
+        if let Some(file_progress) = &file_progress {
+            file_progress.add(n as u64);
+        }
     }
     file.flush().await?;
     let hash = hasher.finalize().to_hex().to_string();
@@ -766,7 +828,16 @@ async fn receive_file(
             ack.hash
         );
     }
+    if let Some(sink) = &opts.events {
+        sink(ServerEvent::FileProgress {
+            peer_id: peer_id.clone(),
+            id: file_id,
+            name: planned.label.clone(),
+            done: if ok { expected } else { offset + written },
+            size: expected,
+        });
+    }
     proto::write_msg(&mut send, &ack).await.ok();
     let _ = send.finish();
-    Ok((planned.label.clone(), written, ok))
+    Ok((file_id, planned.label.clone(), written, ok))
 }

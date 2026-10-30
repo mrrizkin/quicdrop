@@ -85,6 +85,8 @@ impl Harness {
             quiet: true,
             name: None,
             progress: None,
+            file_progress: None,
+            cancel: None,
         };
         timeout(Duration::from_secs(20), client::send(opts)).await?
     }
@@ -178,6 +180,8 @@ async fn deny_policy_rejects_everything() -> Result<()> {
             quiet: true,
             name: None,
             progress: None,
+            file_progress: None,
+            cancel: None,
         }),
     )
     .await?;
