@@ -48,27 +48,27 @@ jobs:
         shell: bash
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          out="dist"
-          mkdir -p "$out"
+          name="quicdrop-${version}-${{ matrix.name }}"
+          mkdir -p "dist/$name"
           if [ "$RUNNER_OS" = "macOS" ]; then
             for target in aarch64-apple-darwin x86_64-apple-darwin; do
               cargo build --release --locked -p qd -p qd-daemon --target "$target"
             done
             for bin in qd quicdropd; do
-              lipo -create -output "$staging/$bin" \
+              lipo -create -output "dist/$name/$bin" \
                 "target/aarch64-apple-darwin/release/$bin" \
                 "target/x86_64-apple-darwin/release/$bin"
             done
-            cp LICENSE-MIT README.md "$staging/"
+            cp LICENSE-MIT README.md "dist/$name/"
           elif [ "$RUNNER_OS" = "Windows" ]; then
             cargo build --release --locked
-            cp target/release/qd.exe target/release/quicdropd.exe LICENSE-MIT README.md "$staging/"
+            cp target/release/qd.exe target/release/quicdropd.exe LICENSE-MIT README.md "dist/$name/"
           else
             cargo build --release --locked
-            cp target/release/qd target/release/quicdropd LICENSE-MIT README.md "$staging/"
+            cp target/release/qd target/release/quicdropd LICENSE-MIT README.md "dist/$name/"
           fi
-          tar -C dist -czf "dist/$out.tar.gz" "$out"
-          rm -rf "$staging"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          rm -rf "dist/$name"
       - uses: actions/upload-artifact@v4
         with:
           name: cli-${{ matrix.name }}
