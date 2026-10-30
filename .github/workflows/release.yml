@@ -47,22 +47,28 @@ jobs:
       - name: build
         shell: bash
         run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          out="dist/quicdrop-${version}-${{ matrix.name }}"
+          mkdir -p "$out"
           if [ "$RUNNER_OS" = "macOS" ]; then
-            cargo build --release --locked --target universal-apple-darwin -p qd -p qd-daemon
-            dir=target/universal-apple-darwin/release
+            for target in aarch64-apple-darwin x86_64-apple-darwin; do
+              cargo build --release --locked -p qd -p qd-daemon --target "$target"
+            done
+            for bin in qd quicdropd; do
+              lipo -create -output "$out/$bin" \
+                "target/aarch64-apple-darwin/release/$bin" \
+                "target/x86_64-apple-darwin/release/$bin"
+            done
+            cp LICENSE-MIT README.md "$out/"
+          elif [ "$RUNNER_OS" = "Windows" ]; then
+            cargo build --release --locked
+            cp target/release/qd.exe target/release/quicdropd.exe LICENSE-MIT README.md "$out/"
           else
             cargo build --release --locked
-            dir=target/release
+            cp target/release/qd target/release/quicdropd LICENSE-MIT README.md "$out/"
           fi
-          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          out="quicdrop-${version}-${{ matrix.name }}"
-          mkdir -p "dist/$out"
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            cp "$dir/qd.exe" "$dir/quicdropd.exe" LICENSE-MIT README.md "dist/$out/"
-          else
-            cp "$dir/qd" "$dir/quicdropd" LICENSE-MIT README.md "dist/$out/"
-          fi
-          tar -C dist -czf "dist/$out.tar.gz" "$out"
+          tar -C dist -czf "dist/quicdrop-${version}-${{ matrix.name }}.tar.gz" \
+            "quicdrop-${version}-${{ matrix.name }}"
       - uses: actions/upload-artifact@v4
         with:
           name: cli-${{ matrix.name }}
@@ -108,7 +114,7 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-binstall
-      - run: cargo binstall -y --no-confirm tauri-cli@^2
+      - run: cargo binstall -y tauri-cli@^2
       - name: linux deps
         if: runner.os == 'Linux'
         working-directory: .
