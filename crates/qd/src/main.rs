@@ -295,10 +295,7 @@ fn parse_duration(s: &str) -> Result<Duration> {
 }
 
 fn default_out_dir() -> PathBuf {
-    dirs::download_dir()
-        .or_else(dirs::home_dir)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("QuicDrop")
+    qd_core::util::default_download_dir()
 }
 
 fn init_tracing(verbose: u8) {

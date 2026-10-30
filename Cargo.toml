@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/qd-core", "crates/qd"]
+members = ["crates/qd-core", "crates/qd", "crates/qd-daemon"]
 resolver = "2"
 
 [workspace.package]

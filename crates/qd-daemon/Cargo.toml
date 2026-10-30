@@ -1,0 +1,29 @@
+[package]
+name = "qd-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "quicdrop daemon: local JSON/SSE API over the transfer engine"
+
+[[bin]]
+name = "quicdropd"
+path = "src/main.rs"
+
+[dependencies]
+qd-core = { path = "../qd-core" }
+anyhow.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+axum = "0.8"
+tokio-stream = { version = "0.1", features = ["sync"] }
+serde_json = "1"
+getrandom = "0.3"
+hex = "0.4.3"
+clap = { version = "4.6.7", features = ["derive", "env"] }
+dirs = "7.0.0"
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tempfile = "3"

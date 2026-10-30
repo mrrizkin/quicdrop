@@ -78,6 +78,13 @@ impl Discovery {
     }
 }
 
+impl Drop for Discovery {
+    fn drop(&mut self) {
+        // Closing the browse channel also ends the mDNS reader thread.
+        let _ = self.daemon.shutdown();
+    }
+}
+
 /// Start advertising ourselves and listening for peers.
 pub async fn start(
     identity: Arc<Identity>,
@@ -118,7 +125,11 @@ pub async fn start(
     {
         let tx = tx.clone();
         let me = identity.device_id.clone();
-        tokio::task::spawn_blocking(move || {
+        // A dedicated thread, not a runtime blocking task: this loop lives as
+        // long as the mDNS daemon does and must not stall runtime shutdown.
+        std::thread::Builder::new()
+            .name("qd-mdns".into())
+            .spawn(move || {
             while let Ok(event) = browse.recv() {
                 if let ServiceEvent::ServiceResolved(info) = event {
                     let device_id = info
@@ -161,7 +172,8 @@ pub async fn start(
                     }
                 }
             }
-        });
+            })
+            .context("spawn mDNS reader")?;
     }
 
     // ---- UDP beacon -------------------------------------------------------

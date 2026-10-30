@@ -20,6 +20,14 @@ pub fn human_rate(bytes_per_sec: f64) -> String {
     format!("{}/s", human_bytes(bytes_per_sec as u64))
 }
 
+/// Default receive directory: `~/Downloads/QuicDrop`.
+pub fn default_download_dir() -> PathBuf {
+    dirs::download_dir()
+        .or_else(dirs::home_dir)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("QuicDrop")
+}
+
 /// Relative age of a unix timestamp, e.g. `3m ago`.
 pub fn human_age(unix_secs: u64) -> String {
     let now = std::time::SystemTime::now()

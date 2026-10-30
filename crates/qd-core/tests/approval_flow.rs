@@ -92,6 +92,7 @@ impl Harness {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::await_holding_lock)] // the lock serializes env mutation on purpose
 async fn approval_accept_reject_and_remember() -> Result<()> {
     let _guard = env_guard();
     let harness = Harness::new().await?;
@@ -145,6 +146,7 @@ async fn approval_accept_reject_and_remember() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::await_holding_lock)] // the lock serializes env mutation on purpose
 async fn deny_policy_rejects_everything() -> Result<()> {
     let _guard = env_guard();
     let root = tempfile::tempdir()?;

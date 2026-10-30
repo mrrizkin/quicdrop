@@ -18,7 +18,8 @@ use crate::trust::TrustStore;
 use crate::util::{human_bytes, human_rate, sanitize_file_name, unique_path};
 
 /// What to do with a transfer from a device that is not in the trust store.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Policy {
     /// Ask the user (or the embedding UI) for every unknown device.
     #[default]
@@ -45,6 +46,44 @@ pub struct ServerOpts {
     pub approver: Option<ApprovalSender>,
     /// Structured session events for embedders (daemon, GUI).
     pub events: Option<ServerEventSink>,
+    /// Optional live overrides for settings a long-running host changes at runtime.
+    pub runtime: Option<Arc<RuntimeSettings>>,
+}
+
+/// Settings that can be changed after the server started (used by the daemon).
+#[derive(Debug)]
+pub struct RuntimeSettings {
+    out_dir: std::sync::RwLock<PathBuf>,
+    policy: std::sync::RwLock<Policy>,
+}
+
+impl RuntimeSettings {
+    pub fn new(out_dir: PathBuf, policy: Policy) -> Self {
+        Self {
+            out_dir: std::sync::RwLock::new(out_dir),
+            policy: std::sync::RwLock::new(policy),
+        }
+    }
+
+    pub fn out_dir(&self) -> PathBuf {
+        self.out_dir.read().map(|p| p.clone()).unwrap_or_default()
+    }
+
+    pub fn set_out_dir(&self, dir: PathBuf) {
+        if let Ok(mut slot) = self.out_dir.write() {
+            *slot = dir;
+        }
+    }
+
+    pub fn policy(&self) -> Policy {
+        self.policy.read().map(|p| *p).unwrap_or_default()
+    }
+
+    pub fn set_policy(&self, policy: Policy) {
+        if let Ok(mut slot) = self.policy.write() {
+            *slot = policy;
+        }
+    }
 }
 
 impl std::fmt::Debug for ServerOpts {
@@ -57,6 +96,7 @@ impl std::fmt::Debug for ServerOpts {
             .field("policy", &self.policy)
             .field("approver", &self.approver.is_some())
             .field("events", &self.events.is_some())
+            .field("runtime", &self.runtime.is_some())
             .finish()
     }
 }
@@ -68,7 +108,7 @@ pub enum ServerEvent {
     Session {
         peer_id: String,
         peer_name: String,
-        files: usize,
+        files: Vec<FileMeta>,
         total_bytes: u64,
     },
     Progress {
@@ -114,6 +154,23 @@ impl ServerOpts {
             trust: TrustStore::default(),
             approver: None,
             events: None,
+            runtime: None,
+        }
+    }
+
+    /// Output directory, including a runtime override if one is set.
+    pub fn effective_out_dir(&self) -> PathBuf {
+        match &self.runtime {
+            Some(runtime) => runtime.out_dir(),
+            None => self.out_dir.clone(),
+        }
+    }
+
+    /// Policy for unknown devices, including a runtime override if one is set.
+    pub fn effective_policy(&self) -> Policy {
+        match &self.runtime {
+            Some(runtime) => runtime.policy(),
+            None => self.policy,
         }
     }
 }
@@ -287,7 +344,15 @@ async fn handle_connection(
     }
 
     // Ask before touching the disk: a declined transfer must not create files.
-    let decision = decide(&opts, &sender_id, &sender_name, &sender_platform, &files).await;
+    let decision = decide(
+        opts.effective_policy(),
+        &opts,
+        &sender_id,
+        &sender_name,
+        &sender_platform,
+        &files,
+    )
+    .await;
     if let Decision::Reject { reason } = decision {
         info!("declined transfer from \"{sender_name}\": {reason}");
         emit(
@@ -311,6 +376,8 @@ async fn handle_connection(
         return Ok(());
     }
 
+    let out_dir = opts.effective_out_dir();
+
     // Decide destination paths *before* accepting so the offsets we report are the
     // offsets we will actually append to.
     let mut plan: Vec<PlannedFile> = Vec::with_capacity(files.len());
@@ -319,7 +386,7 @@ async fn handle_connection(
     for meta in files {
         let name = sanitize_file_name(&meta.name);
         // Resume: continue from a leftover partial file instead of creating "name (1)".
-        let (dest, offset) = match same_partial(&opts.out_dir, &name, meta.size).await? {
+        let (dest, offset) = match same_partial(&out_dir, &name, meta.size).await? {
             Some(existing) => {
                 let len = tokio::fs::metadata(&existing)
                     .await
@@ -327,7 +394,7 @@ async fn handle_connection(
                     .unwrap_or(0);
                 (existing, len)
             }
-            None => (unique_path(&opts.out_dir, &name), 0),
+            None => (unique_path(&out_dir, &name), 0),
         };
         total += meta.size.saturating_sub(offset);
         accepted.push(AcceptFile {
@@ -384,7 +451,7 @@ async fn handle_connection(
         ServerEvent::Session {
             peer_id: sender_id.clone(),
             peer_name: sender_name.clone(),
-            files: plan.len(),
+            files: plan.iter().map(|p| p.meta.clone()).collect(),
             total_bytes: total,
         },
     );
@@ -499,13 +566,14 @@ async fn handle_connection(
 /// Trusted devices are accepted silently, unknown ones follow `opts.policy`, and
 /// anything we cannot answer fails closed with a reason the sender can show.
 async fn decide(
+    policy: Policy,
     opts: &ServerOpts,
     peer_id: &str,
     peer_name: &str,
     peer_platform: &str,
     files: &[FileMeta],
 ) -> Decision {
-    match opts.policy {
+    match policy {
         Policy::Deny => {
             return Decision::reject("receiver is not accepting transfers (policy: deny)")
         }
