@@ -179,8 +179,7 @@ jobs:
           useradd -m builder
           chown -R builder .
           su builder -c "cd packaging/arch && makepkg -s --noconfirm"
-      # The Arch recipe is also published as an AUR package; this job only proves it
-      # still builds against the tag, so the bundle is not attached to the release.
+      # Proves the recipe builds against the tag; the package itself ships via the AUR.
 
   publish:
     needs: [cli, desktop, arch]
@@ -195,8 +194,8 @@ jobs:
           # This job only downloads artifacts, so the version comes from the tag.
           version="${GITHUB_REF_NAME#v}"
           cd dist
-          # A missing bundle used to surface as an absent download, not a failed build.
-          # The flatpak is attached by its own workflow, so it is not listed here.
+          # Fails the release when an expected asset is missing. The flatpak is
+          # attached by its own workflow, so it is not listed here.
           for expected in \
             "quicdrop-$version-linux-x86_64.tar.gz" \
             "quicdrop-$version-windows-x86_64.tar.gz" \

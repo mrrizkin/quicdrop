@@ -1,20 +1,19 @@
 # AUR recipes
 
-Two packages, both installable with your favourite AUR helper:
+Two packages:
 
-| Directory     | Package        | Source                                              |
-| ------------- | -------------- | --------------------------------------------------- |
-| `quicdrop-bin`| prebuilt       | the release `.deb`, which carries the CLI and the desktop binary |
-| `quicdrop`    | source build   | `v<pkgver>` archive from GitHub, built with cargo    |
+| Directory      | Package      | Source                                                           |
+| -------------- | ------------ | ---------------------------------------------------------------- |
+| `quicdrop-bin` | prebuilt     | the release `.deb`, which carries the CLI and the desktop binary |
+| `quicdrop`     | source build | `v<pkgver>` archive from GitHub                                  |
 
 `quicdrop-bin` installs `qd`, `quicdropd`, `quicdrop-desktop`, the desktop entry and
 the icons. `quicdrop` builds all three from source and needs the Tauri build deps.
 
 ## Publishing
 
-AUR keeps one git repository per package, so these directories become two
-repositories. First replace the `# Maintainer:` line in each `PKGBUILD` with your
-name and email — AUR requires it.
+AUR keeps one git repository per package. Replace the `# Maintainer:` line in each
+`PKGBUILD` with your name and email first; AUR requires it.
 
 ```bash
 cd packaging/aur/quicdrop-bin
@@ -22,7 +21,7 @@ makepkg --printsrcinfo > .SRCINFO
 git init -q
 git remote add origin ssh://aur@aur.archlinux.org/quicdrop-bin.git
 git add PKGBUILD .SRCINFO
-git commit -m "quicdrop-bin 2026.44.9-1"
+git commit -m "quicdrop-bin <version>-1"
 git push origin master
 ```
 
@@ -30,23 +29,14 @@ The same for `quicdrop`.
 
 ## Updates
 
-For each release, bump `pkgver` and refresh the checksums:
-
 ```bash
 updpkgsums                      # rewrites sha256sums from the sources
 makepkg --printsrcinfo > .SRCINFO
 ```
 
-`quicdrop-bin` pulls two assets: `quicdrop-desktop-<version>-amd64.deb`, which
-carries `qd`, `quicdropd`, the desktop binary and its icons, and the source
-archive for the licence text. Both names appear in `source=()`, so check them
-against the release page before trusting `updpkgsums` — it fails to download,
-not to notice a rename.
-
-The `quicdrop` archive checksum comes from
-`https://github.com/<owner>/quicdrop/archive/v<pkgver>.tar.gz`. GitHub has
-regenerated these archives before; if the sum stops matching, re-run `updpkgsums`
-against a fresh download rather than pinning the old value.
+`quicdrop-bin` sources are `quicdrop-desktop-<version>-amd64.deb` (three binaries,
+desktop entry, icons) and the source archive (licence text). A renamed asset makes
+`updpkgsums` fail on the missing URL, so check both against the release page.
 
 ## Testing a recipe
 

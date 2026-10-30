@@ -233,8 +233,8 @@ pub async fn send(opts: SendOpts) -> Result<Summary> {
     let semaphore = Arc::new(Semaphore::new(opts.concurrency.max(1)));
     let file_progress = opts.file_progress.clone().map(throttle_file_sink);
 
-    // A one-chunk file costs three round trips whatever its size, so files that fit in
-    // a single chunk share a stream. Anything larger keeps its own chunk workers.
+    // A one-chunk file costs three round trips whatever its size, so files that
+    // fit share a stream. Anything larger keeps its own chunk workers.
     const BATCH_BYTES: u64 = 8 * 1024 * 1024;
     const BATCH_FILES: usize = 64;
     enum Group {
@@ -603,8 +603,7 @@ async fn check_ack(recv: &mut quinn::RecvStream, hash: &str) -> Result<()> {
     Ok(())
 }
 
-/// Send several single-chunk files over one stream. Each file still gets its own
-/// verdict, but the stream and its round trips are shared.
+/// Send several single-chunk files over one stream, one verdict each.
 async fn send_batch(
     conn: &quinn::Connection,
     session: [u8; 16],
@@ -655,8 +654,7 @@ async fn send_batch(
             }
         }
     }
-    // Bodies are written before any answer is read, so a failure here leaves the
-    // remaining files unsent rather than half-answered.
+    // Bodies are written before any answer is read; a failure leaves the rest unsent.
     let _ = send.finish();
     for (index, hash) in hashes.iter().enumerate() {
         let Some(hash) = hash else { break };

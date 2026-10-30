@@ -13,7 +13,7 @@ provides=('quicdrop')
 conflicts=('quicdrop' 'quicdrop-git')
 options=('!strip' '!debug')
 makedepends=('libarchive')
-# The desktop bundle carries qd and quicdropd too, so both come from one build.
+# The desktop bundle carries qd and quicdropd, so both come from one build.
 source=(
   "quicdrop-desktop-$pkgver-amd64.deb::$url/releases/download/v$pkgver/quicdrop-desktop-$pkgver-amd64.deb"
   "$_pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz"
