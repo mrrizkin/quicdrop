@@ -4,6 +4,8 @@
 #   scripts/bench-transfer.sh            # 512 MiB, 2 GiB and 10k small files
 #   RUNS=5 scripts/bench-transfer.sh     # more repetitions
 #   PERF=1 scripts/bench-transfer.sh     # also record perf counters
+#   REMOTE=10.0.0.5:53320 scripts/bench-transfer.sh
+#                                        # send to a peer instead of loopback
 #
 # Payloads live on tmpfs when it exists, so the run measures the transfer path
 # instead of the disk. Point SRC_ROOT at a real directory to include the disk.
@@ -19,6 +21,7 @@ API_PORT=${API_PORT:-54319}
 DISC_PORT=${DISC_PORT:-54321}
 WORK=${WORK:-$(mktemp -d)}
 PERF=${PERF:-0}
+REMOTE=${REMOTE:-}
 
 BIN="$ROOT/target/release"
 if [[ ! -x "$BIN/qd" || ! -x "$BIN/quicdropd" ]]; then
@@ -66,7 +69,14 @@ small_files() {
     done
 }
 
+# With REMOTE set the receiver is another machine: nothing local to start, and the
+# output directory and CPU counters belong to that machine.
 start_daemon() {
+    if [[ -n "$REMOTE" ]]; then
+        TARGET=$REMOTE
+        return
+    fi
+    TARGET="127.0.0.1:$QUIC_PORT"
     "$BIN/quicdropd" \
         --listen "127.0.0.1:$API_PORT" \
         --port "$QUIC_PORT" \
@@ -99,10 +109,10 @@ send() {
         if [[ "$PERF" == "1" ]] && command -v perf >/dev/null; then
             perf stat -e task-clock,cycles,instructions,context-switches \
                 -o "$WORK/perf.run" \
-                "$BIN/qd" --quiet --port "$QUIC_PORT" send --to "127.0.0.1:$QUIC_PORT" "$@" \
+                "$BIN/qd" --quiet --port "$QUIC_PORT" send --to "$TARGET" "$@" \
                 >"$WORK/send.log" 2>&1
         else
-            "$BIN/qd" --quiet --port "$QUIC_PORT" send --to "127.0.0.1:$QUIC_PORT" "$@" \
+            "$BIN/qd" --quiet --port "$QUIC_PORT" send --to "$TARGET" "$@" \
                 >"$WORK/send.log" 2>&1
         fi
         ended=$(date +%s%N)
@@ -133,7 +143,11 @@ payload "$SRC_ROOT/large.bin" $((2 * 1024 * 1024 * 1024))
 small_files "$SRC_ROOT/small" 10000
 
 start_daemon
-echo "daemon : pid $DAEMON_PID on udp/$QUIC_PORT"
+if [[ -n "$REMOTE" ]]; then
+    echo "target : $TARGET"
+else
+    echo "daemon : pid $DAEMON_PID on udp/$QUIC_PORT"
+fi
 echo
 
 send "512 MiB file" $((512 * 1024 * 1024)) "$SRC_ROOT/medium.bin"
