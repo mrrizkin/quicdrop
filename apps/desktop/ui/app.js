@@ -57,6 +57,74 @@ function shortId(id) {
   return esc(String(id || "").slice(0, 8));
 }
 
+/* Stable, distinct avatar colour per device id. */
+function hueFor(id) {
+  let h = 0;
+  for (const ch of String(id || "")) h = (h * 31 + ch.charCodeAt(0)) % 360;
+  return h;
+}
+
+function fmtRate(bytesPerSec) {
+  if (!bytesPerSec || !Number.isFinite(bytesPerSec)) return "";
+  return `${fmtBytes(bytesPerSec)}/s`;
+}
+
+function fmtEta(seconds) {
+  if (!Number.isFinite(seconds) || seconds <= 0) return "";
+  if (seconds < 60) return `${Math.ceil(seconds)}s left`;
+  if (seconds < 3600) return `${Math.ceil(seconds / 60)}m left`;
+  return `${Math.ceil(seconds / 3600)}h left`;
+}
+
+/* Smoothed throughput per transfer, fed by the SSE progress events. */
+const speedSamples = new Map();
+
+function rateFor(transfer) {
+  if (transfer.status !== "active") return 0;
+  const now = Date.now();
+  const prev = speedSamples.get(transfer.id);
+  const bytes = transfer.transferred || 0;
+  if (!prev) {
+    speedSamples.set(transfer.id, { bytes, at: now, rate: 0 });
+    return 0;
+  }
+  const elapsed = (now - prev.at) / 1000;
+  if (elapsed < 0.3) return prev.rate || 0;
+  const instant = Math.max(0, bytes - prev.bytes) / elapsed;
+  const rate = prev.rate ? prev.rate * 0.65 + instant * 0.35 : instant;
+  speedSamples.set(transfer.id, { bytes, at: now, rate });
+  return rate;
+}
+
+/* ---------- theme ---------- */
+
+const THEME_KEY = "quicdrop-theme";
+
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+}
+
+function initTheme() {
+  let saved = null;
+  try {
+    saved = localStorage.getItem(THEME_KEY);
+  } catch (_) {
+    /* ignore */
+  }
+  const prefersLight = window.matchMedia("(prefers-color-scheme: light)").matches;
+  applyTheme(saved || (prefersLight ? "light" : "dark"));
+}
+
+function toggleTheme() {
+  const next = document.documentElement.dataset.theme === "light" ? "dark" : "light";
+  applyTheme(next);
+  try {
+    localStorage.setItem(THEME_KEY, next);
+  } catch (_) {
+    /* ignore */
+  }
+}
+
 let toastTimer;
 function toast(message) {
   const el = $("toast");
@@ -130,10 +198,15 @@ function renderAll() {
 }
 
 function renderDevice() {
-  const { name, short_id: shortIdValue } = state.info;
+  const { name, short_id: shortIdValue, device_id } = state.info;
   $("device-name").textContent = name || "this device";
   $("device-id").textContent = shortIdValue ? `id ${shortIdValue}` : "";
   $("device-dot").classList.add("on");
+  const avatar = $("self-avatar");
+  if (avatar) {
+    avatar.textContent = initial(name);
+    avatar.style.setProperty("--hue", hueFor(device_id || shortIdValue));
+  }
 }
 
 function renderPeers() {
@@ -144,18 +217,43 @@ function renderPeers() {
       ? "Looking for devices on your network…"
       : "Pick a device, then send files or drop them here.";
 
+  const selected = Boolean(state.selectedPeer);
+  $("btn-send").disabled = !selected;
+  $("btn-send-folder").disabled = !selected;
+
+  if (state.peers.length === 0) {
+    list.innerHTML = `
+      <li class="peer-empty">
+        <div class="radar"></div>
+        <div>No devices yet. Open QuicDrop on another device on the same Wi-Fi.</div>
+      </li>`;
+    return;
+  }
+
   list.innerHTML = state.peers
     .map((peer) => {
-      const selected = state.selectedPeer === peerKey(peer);
+      const key = peerKey(peer);
+      const isSelected = state.selectedPeer === key;
       return `
-        <li class="peer ${selected ? "selected" : ""}" data-key="${esc(peerKey(peer))}">
-          <div class="avatar ${peer.source === "beacon" ? "alt" : ""}">${initial(peer.name)}</div>
-          <div class="peer-main">
-            <div class="peer-name">${esc(peer.name)}</div>
-            <div class="peer-meta">${esc(peer.platform)} · ${shortId(peer.device_id)}</div>
+        <li class="peer ${isSelected ? "selected" : ""}" data-key="${esc(key)}"
+            title="${esc(peer.name)}">
+          <span class="peer-check">✓</span>
+          <div class="peer-top">
+            <div class="avatar" style="--hue:${hueFor(peer.device_id)}">${initial(peer.name)}</div>
+            <div class="peer-main">
+              <div class="peer-name">${esc(peer.name)}</div>
+              <div class="peer-meta">
+                <span>${shortId(peer.device_id)}</span>
+                <span class="sep">·</span>
+                <span>${esc(peer.source || "mdns")}</span>
+              </div>
+            </div>
           </div>
-          ${peer.trusted ? '<span class="trusted-tag">trusted</span>' : ""}
-          <button class="secondary small" data-send="${esc(peerKey(peer))}">Send</button>
+          <div class="peer-foot">
+            <span class="chip">${esc(peer.platform || "unknown")}</span>
+            ${peer.trusted ? '<span class="trusted-tag">trusted</span>' : ""}
+            <button class="peer-send" data-send="${esc(key)}">Send</button>
+          </div>
         </li>`;
     })
     .join("");
@@ -188,14 +286,15 @@ function renderTrust() {
   $("trust-count").textContent = state.trust.length;
   const list = $("trust-list");
   if (state.trust.length === 0) {
-    list.innerHTML = `<li class="hint" style="padding:6px 2px">No devices trusted yet.</li>`;
+    list.innerHTML = `<li class="hint" style="padding:4px 6px">No devices trusted yet.</li>`;
     return;
   }
   list.innerHTML = state.trust
     .map(
       (peer) => `
       <li class="trust-item">
-        <span class="name">${esc(peer.name)}</span>
+        <div class="avatar" style="--hue:${hueFor(peer.device_id)}">${initial(peer.name)}</div>
+        <span class="name" title="${esc(peer.name)}">${esc(peer.name)}</span>
         <span class="when">${timeAgo(peer.last_seen)}</span>
         <button class="icon-btn" data-forget="${esc(peer.device_id)}" title="Forget device">✕</button>
       </li>`,
@@ -208,14 +307,23 @@ function renderTrust() {
 
 function renderTransfers() {
   const list = $("transfer-list");
+  const active = state.transfers.filter((t) => t.status === "active").length;
+  $("transfer-count").textContent =
+    state.transfers.length === 0
+      ? ""
+      : active > 0
+        ? `${active} active`
+        : `${state.transfers.length} recent`;
+
   if (state.transfers.length === 0) {
     list.innerHTML = `<li class="empty">Nothing transferred yet.</li>`;
     return;
   }
   list.innerHTML = state.transfers
     .map((transfer) => {
-      const total = transfer.total_bytes || 1;
-      const pct = Math.min(100, Math.round(((transfer.transferred || 0) / total) * 100));
+      const total = transfer.total_bytes || 0;
+      const done = transfer.transferred || 0;
+      const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
       const files = transfer.files || [];
       const summary =
         files.length === 0
@@ -223,20 +331,32 @@ function renderTransfers() {
           : files.length === 1
             ? files[0].name
             : `${files[0].name} +${files.length - 1} more`;
+
+      const rate = rateFor(transfer);
+      const eta = rate > 0 ? fmtEta((total - done) / rate) : "";
+      const bits = [
+        `${transfer.direction === "in" ? "from" : "to"} ${esc(transfer.peer_name)}`,
+        `${fmtBytes(done)} / ${fmtBytes(total)}`,
+        rate > 0 ? fmtRate(rate) : "",
+        eta,
+        timeAgo(transfer.finished_at || transfer.started_at),
+      ].filter(Boolean);
+      if (transfer.error) bits.push(esc(transfer.error));
+
       return `
         <li class="transfer ${esc(transfer.status)}">
-          <div class="transfer-top">
-            <div class="dir ${transfer.direction}">${transfer.direction === "in" ? "↓" : "↑"}</div>
-            <div class="transfer-title">${esc(summary)}</div>
+          <div class="dir ${esc(transfer.direction)}">${transfer.direction === "in" ? "↓" : "↑"}</div>
+          <div class="t-main">
+            <div class="transfer-top">
+              <div class="transfer-title" title="${esc(summary)}">${esc(summary)}</div>
+            </div>
+            <div class="transfer-sub">${bits.join(" · ")}</div>
+            <div class="bar"><span style="width:${pct}%"></span></div>
+          </div>
+          <div class="t-side">
             <span class="status ${esc(transfer.status)}">${esc(transfer.status)}</span>
+            <span class="t-pct">${transfer.status === "active" ? pct + "%" : ""}</span>
           </div>
-          <div class="transfer-sub">
-            ${transfer.direction === "in" ? "from" : "to"} ${esc(transfer.peer_name)}
-            · ${fmtBytes(transfer.transferred)} / ${fmtBytes(transfer.total_bytes)}
-            · ${timeAgo(transfer.finished_at || transfer.started_at)}
-            ${transfer.error ? ` · ${esc(transfer.error)}` : ""}
-          </div>
-          <div class="bar"><span style="width:${pct}%"></span></div>
         </li>`;
     })
     .join("");
@@ -250,6 +370,8 @@ function renderApproval() {
     return;
   }
   $("approval-avatar").textContent = initial(approval.peer_name);
+  $("approval-avatar").style.setProperty("--hue", hueFor(approval.peer_id));
+  $("approval-dest").textContent = state.config.out_dir || "your download folder";
   $("approval-title").textContent = `"${approval.peer_name}" wants to send`;
   $("approval-sub").textContent = `${approval.files.length} file(s) · ${fmtBytes(approval.total_bytes)} · ${approval.peer_platform || "unknown platform"}`;
   $("approval-files").innerHTML = approval.files
@@ -362,6 +484,8 @@ async function saveSettings() {
 
 /* ---------- wiring ---------- */
 
+$("btn-theme").addEventListener("click", toggleTheme);
+$("settings-close").addEventListener("click", () => ($("settings-modal").hidden = true));
 $("btn-send").addEventListener("click", sendToSelected);
 $("btn-send-folder").addEventListener("click", sendFolderToSelected);
 $("btn-settings").addEventListener("click", openSettings);
@@ -461,6 +585,7 @@ async function setupDragDrop() {
 }
 
 (async function boot() {
+  initTheme();
   try {
     state.info = await invoke("daemon_info");
   } catch (error) {

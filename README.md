@@ -22,6 +22,9 @@ window. Mobile is intentionally out of scope for now.
 
 ![QuicDrop desktop](docs/screenshot.png)
 
+Dark and light, plus the approval modal: [`docs/screenshot-light.png`](docs/screenshot-light.png),
+[`docs/screenshot-approval.png`](docs/screenshot-approval.png).
+
 ## Why QUIC
 
 LocalSend's bottleneck is rarely raw bandwidth; it is per-file serialization, TCP
@@ -141,8 +144,10 @@ It is a Tauri v2 window with no bundler and no npm: `ui/` is plain HTML/CSS/JS, 
 disk in dev and embedded in release builds. The Rust side starts the daemon in-process,
 forwards its event stream to the webview as Tauri events, and proxies API calls through an
 `api` command so the bearer token never enters the webview and there is no CORS surface.
-Incoming offers appear as a modal; the transfer list updates live from SSE; drag & drop sends
-to the selected device, and **Send files…** / **Send folder…** cover the picker flows.
+Incoming offers appear as a modal; the transfer list updates live from SSE with throughput and
+ETA; drag & drop sends to the selected device, and **Send files…** / **Send folder…** cover the
+picker flows. The window ships a dark theme by default with a light theme behind the toggle in
+the sidebar (persisted in `localStorage`, seeded from `prefers-color-scheme`).
 
 Linux needs the usual Tauri deps (`webkit2gtk-4.1`, `gtk+-3.0`, `libsoup-3.0`,
 `javascriptcoregtk-4.1`).

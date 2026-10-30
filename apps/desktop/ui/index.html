@@ -15,66 +15,83 @@
       </div>
     </div>
 
-    <header class="topbar">
-      <div class="brand">
-        <div class="logo">Q</div>
-        <div>
-          <h1>QuicDrop</h1>
-          <p class="tagline">direct transfer over QUIC</p>
-        </div>
-      </div>
-      <div class="device" id="device">
-        <span class="dot" id="device-dot"></span>
-        <div>
-          <div class="device-name" id="device-name">starting…</div>
-          <div class="device-id" id="device-id"></div>
-        </div>
-      </div>
-      <button class="ghost" id="btn-settings" title="Settings">⚙</button>
-    </header>
-
-    <main class="layout">
-      <section class="panel">
-        <div class="panel-head">
-          <h2>Nearby devices</h2>
-          <span class="badge" id="peer-count">0</span>
-        </div>
-        <p class="hint" id="peers-hint">Looking for devices on your network…</p>
-        <ul class="peer-list" id="peer-list"></ul>
-
-        <div class="divider"></div>
-        <div class="panel-head">
-          <h2>Trusted devices</h2>
-          <span class="badge" id="trust-count">0</span>
-        </div>
-        <p class="hint">These can send to you without asking.</p>
-        <ul class="trust-list" id="trust-list"></ul>
-      </section>
-
-      <section class="panel grow">
-        <div class="panel-head">
-          <h2>Transfers</h2>
-          <div class="panel-actions">
-            <button class="ghost small" id="btn-send">Send files…</button>
-            <button class="ghost small" id="btn-send-folder">Send folder…</button>
+    <div class="app">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="logo">Q</div>
+          <div class="brand-text">
+            <h1>QuicDrop</h1>
+            <span>QUIC · local network</span>
           </div>
+          <button class="ghost icon-only" id="btn-theme" title="Toggle light / dark">
+            <span class="theme-glyph">◐</span>
+          </button>
         </div>
-        <ul class="transfer-list" id="transfer-list">
-          <li class="empty">Nothing transferred yet.</li>
-        </ul>
-      </section>
-    </main>
+
+        <div class="this-device">
+          <div class="avatar self" id="self-avatar">?</div>
+          <div class="self-main">
+            <div class="device-name" id="device-name">starting…</div>
+            <div class="device-id" id="device-id"></div>
+          </div>
+          <span class="dot" id="device-dot" title="online"></span>
+        </div>
+
+        <section class="side-section">
+          <div class="side-head">
+            <h2>Trusted devices</h2>
+            <span class="badge" id="trust-count">0</span>
+          </div>
+          <p class="hint">These can send to you without asking.</p>
+          <ul class="trust-list" id="trust-list"></ul>
+        </section>
+
+        <div class="side-foot">
+          <button class="secondary wide" id="btn-settings">Settings</button>
+          <p class="foot-note">Nothing leaves your local network.</p>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="main-head">
+          <div class="head-text">
+            <h2>Nearby devices</h2>
+            <p class="hint" id="peers-hint">Looking for devices on your network…</p>
+          </div>
+          <div class="main-actions">
+            <span class="badge" id="peer-count">0</span>
+            <button class="secondary" id="btn-send">Send files…</button>
+            <button class="primary" id="btn-send-folder">Send folder…</button>
+          </div>
+        </header>
+
+        <ul class="peer-grid" id="peer-list"></ul>
+
+        <section class="transfers">
+          <div class="side-head">
+            <h2>Transfers</h2>
+            <span class="hint inline" id="transfer-count"></span>
+          </div>
+          <ul class="transfer-list" id="transfer-list">
+            <li class="empty">Nothing transferred yet.</li>
+          </ul>
+        </section>
+      </main>
+    </div>
 
     <div class="modal-backdrop" id="approval-modal" hidden>
       <div class="modal approval">
         <div class="approval-head">
-          <div class="avatar" id="approval-avatar">?</div>
-          <div>
+          <div class="avatar big" id="approval-avatar">?</div>
+          <div class="approval-copy">
             <h2 id="approval-title">Incoming transfer</h2>
             <p class="hint" id="approval-sub">wants to send files</p>
           </div>
         </div>
         <ul class="file-list" id="approval-files"></ul>
+        <p class="approval-dest">
+          Saving to <span id="approval-dest">your download folder</span>
+        </p>
         <div class="approval-actions">
           <button class="danger" id="approval-decline">Decline</button>
           <button class="secondary" id="approval-accept">Accept once</button>
@@ -86,7 +103,10 @@
 
     <div class="modal-backdrop" id="settings-modal" hidden>
       <div class="modal">
-        <h2>Settings</h2>
+        <div class="modal-head">
+          <h2>Settings</h2>
+          <button class="ghost icon-only" id="settings-close" title="Close">✕</button>
+        </div>
         <label class="field">
           <span>Save incoming files to</span>
           <div class="row">
@@ -102,9 +122,12 @@
             <option value="deny">Reject automatically</option>
           </select>
         </label>
+        <p class="field-note">
+          Trusted devices are always accepted. Forgetting a device makes it ask again.
+        </p>
         <div class="row end">
           <button class="ghost" id="settings-cancel">Cancel</button>
-          <button class="primary" id="settings-save">Save</button>
+          <button class="primary" id="settings-save">Save changes</button>
         </div>
       </div>
     </div>
