@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 /// ALPN identifier; bumped when the wire format changes incompatibly.
 pub const ALPN: &[u8] = b"quicdrop/1";
 /// Bumped when a frame's shape or meaning changes.
-pub const PROTO_VERSION: u16 = 4;
+pub const PROTO_VERSION: u16 = 5;
 
 pub const DEFAULT_QUIC_PORT: u16 = 53320;
 pub const DEFAULT_DISCOVERY_PORT: u16 = 53321;
@@ -180,6 +180,27 @@ pub async fn write_msg_limit<T: Serialize>(
 
 pub async fn read_msg<T: for<'de> Deserialize<'de>>(recv: &mut quinn::RecvStream) -> Result<T> {
     read_msg_limit(recv, MAX_FRAME).await
+}
+
+/// Like [`read_msg`], but a stream that ends cleanly before a frame yields `None`.
+pub async fn read_msg_opt<T: for<'de> Deserialize<'de>>(
+    recv: &mut quinn::RecvStream,
+) -> Result<Option<T>> {
+    let mut len_buf = [0u8; 4];
+    match recv.read_exact(&mut len_buf).await {
+        Ok(()) => {}
+        Err(quinn::ReadExactError::FinishedEarly(0)) => return Ok(None),
+        Err(e) => return Err(e).context("read frame length"),
+    }
+    let len = u32::from_le_bytes(len_buf) as usize;
+    if len > MAX_FRAME {
+        bail!("frame exceeds limit: {len} bytes");
+    }
+    let mut body = vec![0u8; len];
+    recv.read_exact(&mut body)
+        .await
+        .context("read frame body")?;
+    Ok(Some(postcard::from_bytes(&body).context("decode frame")?))
 }
 
 /// [`read_msg`] with an explicit size limit, checked before the buffer is allocated.

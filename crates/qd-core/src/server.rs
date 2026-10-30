@@ -632,36 +632,33 @@ async fn handle_connection(
     let mut finished = 0usize;
     let mut transferred = 0u64;
     let mut failures = 0usize;
-    let mut set: JoinSet<Result<SegmentOutcome>> = JoinSet::new();
+    let mut set: JoinSet<Vec<SegmentOutcome>> = JoinSet::new();
 
     loop {
         tokio::select! {
             joined = set.join_next(), if !set.is_empty() && finished < expected => {
                 match joined {
-                    Some(Ok(Ok((id, name, bytes, ok, complete)))) => {
-                        if !complete {
-                            continue;
+                    Some(Ok(outcomes)) => {
+                        for (id, name, bytes, ok, complete) in outcomes {
+                            if !complete {
+                                continue;
+                            }
+                            finished += 1;
+                            transferred += bytes;
+                            if !ok { failures += 1; }
+                            let status = if ok { "ok" } else { "FAILED" };
+                            println!("  {status:<7} {name} ({})", human_bytes(bytes));
+                            emit(
+                                &opts,
+                                ServerEvent::File {
+                                    peer_id: sender_id.clone(),
+                                    id,
+                                    name,
+                                    bytes,
+                                    ok,
+                                },
+                            );
                         }
-                        finished += 1;
-                        transferred += bytes;
-                        if !ok { failures += 1; }
-                        let status = if ok { "ok" } else { "FAILED" };
-                        println!("  {status:<7} {name} ({})", human_bytes(bytes));
-                        emit(
-                            &opts,
-                            ServerEvent::File {
-                                peer_id: sender_id.clone(),
-                                id,
-                                name,
-                                bytes,
-                                ok,
-                            },
-                        );
-                    }
-                    Some(Ok(Err(e))) => {
-                        finished += 1;
-                        failures += 1;
-                        warn!("file failed: {e:#}");
                     }
                     Some(Err(e)) => {
                         finished += 1;
@@ -670,7 +667,7 @@ async fn handle_connection(
                     }
                     None => break,
                 }
-                if finished == expected {
+                if finished >= expected {
                     break;
                 }
             }
@@ -821,28 +818,49 @@ async fn receive_segment(
     progress: Arc<Progress>,
     opts: ServerOpts,
     peer_id: String,
-) -> Result<SegmentOutcome> {
-    let header: FileHeader = proto::read_msg(&mut recv)
+) -> Vec<SegmentOutcome> {
+    // One stream carries one or more chunk units, so a batch of small files needs a
+    // single stream. Each unit is answered on the reply direction as it completes.
+    let mut outcomes = Vec::new();
+    loop {
+        let header: FileHeader = match proto::read_msg_opt(&mut recv).await {
+            Ok(Some(header)) => header,
+            Ok(None) => break,
+            Err(e) => {
+                debug!("stream ended mid-header: {e:#}");
+                break;
+            }
+        };
+        let Some(planned) = index.get(&header.id).cloned() else {
+            outcomes.push((header.id, String::from("?"), 0, false, true));
+            break;
+        };
+        match write_segment(
+            &mut send,
+            &mut recv,
+            &planned,
+            &header,
+            progress.clone(),
+            &opts,
+            &peer_id,
+        )
         .await
-        .context("read file header")?;
-    let planned = index.get(&header.id).context("unknown file id")?.clone();
-
-    let outcome = write_segment(
-        &mut send, recv, &planned, &header, progress, &opts, &peer_id,
-    )
-    .await;
-    match outcome {
-        Ok(value) => Ok(value),
-        Err(e) => {
-            fail_flight(&planned, format!("{e:#}"));
-            Err(e)
+        {
+            Ok(outcome) => outcomes.push(outcome),
+            Err(e) => {
+                fail_flight(&planned, format!("{e:#}"));
+                outcomes.push((planned.meta.id, planned.label.clone(), 0, false, true));
+                break;
+            }
         }
     }
+    let _ = send.finish();
+    outcomes
 }
 
 async fn write_segment(
     send: &mut quinn::SendStream,
-    mut recv: quinn::RecvStream,
+    recv: &mut quinn::RecvStream,
     planned: &PlannedFile,
     header: &FileHeader,
     progress: Arc<Progress>,
@@ -913,7 +931,7 @@ async fn write_segment(
         remember_range(&planned.dest, start, len).await;
     }
 
-    if let Ok(trailer) = proto::read_msg::<FileTrailer>(&mut recv).await {
+    if let Ok(trailer) = proto::read_msg::<FileTrailer>(recv).await {
         if let Ok(mut slot) = planned.flight.expected_hash.lock() {
             slot.get_or_insert(trailer.hash);
         }
@@ -1038,7 +1056,6 @@ async fn send_ack(send: &mut quinn::SendStream, id: u32, verdict: &Verdict) {
         message: verdict.message.clone(),
     };
     let _ = proto::write_msg(send, &ack).await;
-    let _ = send.finish();
 }
 
 async fn verify_file(planned: &PlannedFile, expected: u64) -> Verdict {

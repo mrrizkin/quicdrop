@@ -1,6 +1,6 @@
 //! Sender side.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use bytes::{Bytes, BytesMut};
 use std::io::{Read, Seek, SeekFrom};
 use std::net::SocketAddr;
@@ -232,58 +232,101 @@ pub async fn send(opts: SendOpts) -> Result<Summary> {
 
     let semaphore = Arc::new(Semaphore::new(opts.concurrency.max(1)));
     let file_progress = opts.file_progress.clone().map(throttle_file_sink);
-    let mut tasks = Vec::with_capacity(accepted.len());
+
+    // A one-chunk file costs three round trips whatever its size, so files that fit in
+    // a single chunk share a stream. Anything larger keeps its own chunk workers.
+    const BATCH_BYTES: u64 = 8 * 1024 * 1024;
+    const BATCH_FILES: usize = 64;
+    enum Group {
+        File(PathBuf, FileMeta, u64),
+        Batch(Vec<(PathBuf, FileMeta, u64)>),
+    }
+
+    let mut groups: Vec<Group> = Vec::new();
+    let mut batch: Vec<(PathBuf, FileMeta, u64)> = Vec::new();
+    let mut batch_bytes = 0u64;
     for item in accepted {
         let Some(path) = paths.get(item.id as usize).cloned() else {
             continue;
         };
         let meta = metas[item.id as usize].clone();
+        if proto::chunk_count(item.offset, meta.size) > 1 {
+            groups.push(Group::File(path, meta, item.offset));
+            continue;
+        }
+        let span = meta.size.saturating_sub(item.offset);
+        if !batch.is_empty() && (batch_bytes + span > BATCH_BYTES || batch.len() >= BATCH_FILES) {
+            groups.push(Group::Batch(std::mem::take(&mut batch)));
+            batch_bytes = 0;
+        }
+        batch_bytes += span;
+        batch.push((path, meta, item.offset));
+    }
+    if !batch.is_empty() {
+        groups.push(Group::Batch(batch));
+    }
+
+    let mut tasks = Vec::with_capacity(groups.len());
+    for group in groups {
         let conn = conn.clone();
         let progress = progress.clone();
         let file_progress = file_progress.clone();
         let permit = semaphore.clone();
         tasks.push(tokio::spawn(async move {
             let _permit = permit.acquire_owned().await;
-            let result = send_one(
-                &conn,
-                session,
-                &path,
-                &meta,
-                item.offset,
-                progress.clone(),
-                file_progress.clone(),
-            )
-            .await;
-            (meta, item.offset, result)
+            match group {
+                Group::File(path, meta, offset) => {
+                    let result = send_one(
+                        &conn,
+                        session,
+                        &path,
+                        &meta,
+                        offset,
+                        progress.clone(),
+                        file_progress.clone(),
+                    )
+                    .await;
+                    vec![(meta, offset, result)]
+                }
+                Group::Batch(items) => {
+                    send_batch(&conn, session, &items, progress, file_progress).await
+                }
+            }
         }));
     }
 
     let mut summary = Summary::default();
     for task in tasks {
-        match task.await {
-            Ok((meta, offset, Ok(bytes))) => {
-                summary.files += 1;
-                summary.ok += 1;
-                summary.bytes += bytes;
-                let name = meta.name.clone();
-                if offset > 0 {
-                    println!(
-                        "  ok      {name} ({} resumed)",
-                        human_bytes(meta.size - offset)
-                    );
-                } else {
-                    println!("  ok      {name} ({})", human_bytes(meta.size));
-                }
-            }
-            Ok((meta, _, Err(e))) => {
-                summary.files += 1;
-                summary.failed += 1;
-                println!("  failed  {}: {e:#}", meta.name);
-            }
+        let results = match task.await {
+            Ok(results) => results,
             Err(e) => {
                 summary.files += 1;
                 summary.failed += 1;
                 println!("  failed  task join error: {e}");
+                continue;
+            }
+        };
+        for (meta, offset, result) in results {
+            match result {
+                Ok(bytes) => {
+                    summary.files += 1;
+                    summary.ok += 1;
+                    summary.bytes += bytes;
+                    let name = meta.name.clone();
+                    if offset > 0 {
+                        println!(
+                            "  ok      {name} ({} resumed)",
+                            human_bytes(meta.size - offset)
+                        );
+                    } else {
+                        println!("  ok      {name} ({})", human_bytes(meta.size));
+                    }
+                }
+                Err(e) => {
+                    summary.files += 1;
+                    summary.failed += 1;
+                    println!("  failed  {}: {e:#}", meta.name);
+                }
             }
         }
     }
@@ -331,15 +374,7 @@ async fn send_one(
     let started = Instant::now();
     // Every chunk carries the same whole-file digest, so the hash is only needed
     // once the first trailer is written. Start it now and overlap it with the payload.
-    let (hash_tx, hash_rx) = watch::channel::<Option<HashState>>(None);
-    {
-        let path = path.to_path_buf();
-        tokio::spawn(async move {
-            let result = hash::hash_file(&path).await.map_err(|e| format!("{e:#}"));
-            let _ = hash_tx.send(Some(result));
-        });
-    }
-
+    let hash_rx = start_hash(path);
     let count = proto::chunk_count(offset, meta.size);
     let workers = proto::stream_count(count) as usize;
     let next = Arc::new(AtomicUsize::new(0));
@@ -435,8 +470,55 @@ async fn send_chunk(
     file_done: &AtomicU64,
 ) -> Result<u64> {
     let (mut send, mut recv) = conn.open_bi().await.context("open file stream")?;
-    proto::write_msg(
+    let (written, hash) = write_unit(
         &mut send,
+        path,
+        meta,
+        start,
+        len,
+        index,
+        count,
+        session,
+        hash_rx,
+        progress,
+        file_progress,
+        file_done,
+    )
+    .await?;
+    send.finish().context("finish file stream")?;
+    check_ack(&mut recv, &hash).await?;
+    Ok(written)
+}
+
+/// Start hashing a file in the background. Every chunk of that file shares the result.
+fn start_hash(path: &Path) -> watch::Receiver<Option<HashState>> {
+    let (hash_tx, hash_rx) = watch::channel::<Option<HashState>>(None);
+    let path = path.to_path_buf();
+    tokio::spawn(async move {
+        let result = hash::hash_file(&path).await.map_err(|e| format!("{e:#}"));
+        let _ = hash_tx.send(Some(result));
+    });
+    hash_rx
+}
+
+/// Write one chunk unit on an existing stream: header, payload pieces, trailer.
+#[allow(clippy::too_many_arguments)]
+async fn write_unit(
+    send: &mut quinn::SendStream,
+    path: &Path,
+    meta: &FileMeta,
+    start: u64,
+    len: u64,
+    index: u16,
+    count: u16,
+    session: [u8; 16],
+    hash_rx: &watch::Receiver<Option<HashState>>,
+    progress: &Progress,
+    file_progress: &Option<FileSink>,
+    file_done: &AtomicU64,
+) -> Result<(u64, String)> {
+    proto::write_msg(
+        send,
         &FileHeader {
             session,
             id: meta.id,
@@ -498,16 +580,19 @@ async fn send_chunk(
 
     let hash = await_hash(hash_rx).await.map_err(anyhow::Error::msg)?;
     proto::write_msg(
-        &mut send,
+        send,
         &FileTrailer {
             id: meta.id,
             hash: hash.clone(),
         },
     )
     .await?;
-    send.finish().context("finish file stream")?;
+    Ok((written, hash))
+}
 
-    let ack: FileAck = proto::read_msg(&mut recv).await.context("read file ack")?;
+/// Read the receiver's verdict for the chunk just written.
+async fn check_ack(recv: &mut quinn::RecvStream, hash: &str) -> Result<()> {
+    let ack: FileAck = proto::read_msg(recv).await.context("read file ack")?;
     if !ack.ok {
         bail!("receiver rejected file: {}", ack.message);
     }
@@ -515,7 +600,79 @@ async fn send_chunk(
     if !ack.hash.is_empty() && ack.hash != hash {
         bail!("peer computed a different digest");
     }
-    Ok(written)
+    Ok(())
+}
+
+/// Send several single-chunk files over one stream. Each file still gets its own
+/// verdict, but the stream and its round trips are shared.
+async fn send_batch(
+    conn: &quinn::Connection,
+    session: [u8; 16],
+    items: &[(PathBuf, FileMeta, u64)],
+    progress: Arc<Progress>,
+    file_progress: Option<FileSink>,
+) -> Vec<(FileMeta, u64, Result<u64>)> {
+    let mut results: Vec<(FileMeta, u64, Result<u64>)> = Vec::with_capacity(items.len());
+    let (mut send, mut recv) = match conn.open_bi().await {
+        Ok(pair) => pair,
+        Err(e) => {
+            let message = format!("open file stream: {e}");
+            for (_, meta, offset) in items {
+                results.push((meta.clone(), *offset, Err(anyhow!(message.clone()))));
+            }
+            return results;
+        }
+    };
+
+    let mut hashes: Vec<Option<String>> = Vec::with_capacity(items.len());
+    for (path, meta, offset) in items {
+        let (start, len) = proto::chunk_range(*offset, meta.size, 0);
+        let done = AtomicU64::new(0);
+        let hash_rx = start_hash(path);
+        let written = write_unit(
+            &mut send,
+            path,
+            meta,
+            start,
+            len,
+            0,
+            1,
+            session,
+            &hash_rx,
+            &progress,
+            &file_progress,
+            &done,
+        )
+        .await;
+        match written {
+            Ok((bytes, hash)) => {
+                results.push((meta.clone(), *offset, Ok(bytes)));
+                hashes.push(Some(hash));
+            }
+            Err(e) => {
+                results.push((meta.clone(), *offset, Err(e)));
+                break;
+            }
+        }
+    }
+    // Bodies are written before any answer is read, so a failure here leaves the
+    // remaining files unsent rather than half-answered.
+    let _ = send.finish();
+    for (index, hash) in hashes.iter().enumerate() {
+        let Some(hash) = hash else { break };
+        if let Err(e) = check_ack(&mut recv, hash).await {
+            if let Some((_, _, result)) = results.get_mut(index) {
+                if result.is_ok() {
+                    *result = Err(e);
+                }
+            }
+            break;
+        }
+    }
+    for (_, meta, offset) in items.iter().skip(results.len()) {
+        results.push((meta.clone(), *offset, Err(anyhow!("stream ended early"))));
+    }
+    results
 }
 
 /// Wait for the background hash. Every chunk of a file shares one digest.
