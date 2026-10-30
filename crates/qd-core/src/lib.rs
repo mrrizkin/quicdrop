@@ -17,6 +17,7 @@ pub mod net;
 pub mod progress;
 pub mod proto;
 pub mod server;
+pub mod source;
 pub mod trust;
 pub mod util;
 
@@ -25,6 +26,7 @@ pub use discovery::Peer;
 pub use identity::Identity;
 pub use server::{Policy, ServerEvent, ServerEventSink};
 pub use quinn;
+pub use source::{expand as expand_sources, SourceFile};
 pub use trust::TrustStore;
 pub use proto::{
     FileMeta, Frame, ALPN, CHUNK_SIZE, DEFAULT_DISCOVERY_PORT, DEFAULT_QUIC_PORT, PROTO_VERSION,

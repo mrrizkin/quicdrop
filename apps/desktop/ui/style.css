@@ -210,6 +210,12 @@ h1 {
   font-weight: 650;
 }
 
+.panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .badge {
   min-width: 22px;
   text-align: center;

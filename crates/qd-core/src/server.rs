@@ -15,7 +15,7 @@ use crate::identity::Identity;
 use crate::progress::Progress;
 use crate::proto::{self, AcceptFile, FileAck, FileHeader, FileMeta, FileTrailer, Frame};
 use crate::trust::TrustStore;
-use crate::util::{human_bytes, human_rate, sanitize_file_name, unique_path};
+use crate::util::{human_bytes, human_rate, sanitize_rel_path, unique_path, wire_path};
 
 /// What to do with a transfer from a device that is not in the trust store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -276,6 +276,8 @@ pub async fn accept_loop(
 struct PlannedFile {
     meta: FileMeta,
     dest: PathBuf,
+    /// Safe relative name shown to the user and in events.
+    label: String,
     offset: u64,
 }
 
@@ -384,9 +386,23 @@ async fn handle_connection(
     let mut accepted: Vec<AcceptFile> = Vec::with_capacity(files.len());
     let mut total: u64 = 0;
     for meta in files {
-        let name = sanitize_file_name(&meta.name);
+        // Senders may announce `folder/sub/file.txt`; sanitising strips traversal and
+        // we recreate the folders below the receive directory.
+        let rel = sanitize_rel_path(&meta.name);
+        let label = wire_path(&rel);
+        let file_name = rel
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "unnamed".to_string());
+        let parent = match rel.parent() {
+            Some(p) if !p.as_os_str().is_empty() => out_dir.join(p),
+            _ => out_dir.clone(),
+        };
+        tokio::fs::create_dir_all(&parent)
+            .await
+            .with_context(|| format!("create {}", parent.display()))?;
         // Resume: continue from a leftover partial file instead of creating "name (1)".
-        let (dest, offset) = match same_partial(&out_dir, &name, meta.size).await? {
+        let (dest, offset) = match same_partial(&parent, &file_name, meta.size).await? {
             Some(existing) => {
                 let len = tokio::fs::metadata(&existing)
                     .await
@@ -394,14 +410,19 @@ async fn handle_connection(
                     .unwrap_or(0);
                 (existing, len)
             }
-            None => (unique_path(&out_dir, &name), 0),
+            None => (unique_path(&parent, &file_name), 0),
         };
         total += meta.size.saturating_sub(offset);
         accepted.push(AcceptFile {
             id: meta.id,
             offset,
         });
-        plan.push(PlannedFile { meta, dest, offset });
+        plan.push(PlannedFile {
+            meta,
+            dest,
+            label,
+            offset,
+        });
     }
 
     proto::write_frame(
@@ -422,6 +443,7 @@ async fn handle_connection(
                     Arc::new(PlannedFile {
                         meta: p.meta.clone(),
                         dest: p.dest.clone(),
+                        label: p.label.clone(),
                         offset: p.offset,
                     }),
                 )
@@ -754,14 +776,5 @@ async fn receive_file(
     }
     proto::write_msg(&mut send, &ack).await.ok();
     let _ = send.finish();
-    Ok((
-        planned
-            .dest
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("file")
-            .to_string(),
-        written,
-        ok,
-    ))
+    Ok((planned.label.clone(), written, ok))
 }

@@ -61,7 +61,7 @@ Needs a Rust toolchain (1.82+). Linux, macOS, Windows.
 ```bash
 qd receive [--out DIR]        # advertise + accept transfers
 qd peers [--timeout 4s]       # who is on this network
-qd send <FILES...> --to PEER  # send files
+qd send <PATHS...> --to PEER  # send files and/or folders
 qd trust                      # list devices allowed to send without asking
 qd trust rm <ID-PREFIX>       # forget a device
 qd id                         # print this device's name / id / config dir
@@ -75,7 +75,10 @@ Global flags: `--port` (QUIC, default `53320`), `--discovery-port` (default `533
 `--name`, `-q/--quiet`, `-v` (repeatable).
 
 Sending options: `-j/--concurrency` (parallel file streams, default 4),
-`--timeout` (how long to wait for the peer to appear, default `5s`).
+`--timeout` (how long to wait for the peer to appear, default `5s`). Folders are walked
+recursively, symlinks are skipped, and relative paths are recreated on the receiver
+(`qd send ~/Pictures --to laptop` lands in `~/Downloads/QuicDrop/Pictures/...`). Empty
+folders are not transferred.
 
 Receiving options: `--policy ask|auto|deny` for devices that are not trusted yet (default
 `ask`; on a terminal it prints the sender and file list). Without a terminal an `ask`
@@ -121,7 +124,7 @@ bind logs a warning.
 | `GET /api/approvals` | pending incoming offers |
 | `POST /api/approvals/{id}` | `{accept, remember}` |
 | `GET/POST /api/trust`, `DELETE /api/trust/{id}` | trust store |
-| `POST /api/send` | `{to, paths, concurrency?}` → transfer id |
+| `POST /api/send` | `{to, paths, concurrency?}` → transfer id (paths may be folders) |
 | `GET/PATCH /api/config` | `{out_dir, policy}` (applied live) |
 | `GET /api/events` | SSE stream: peer, session, progress, approval, trust, config |
 | `POST /api/shutdown` | stop the daemon |
@@ -139,7 +142,7 @@ disk in dev and embedded in release builds. The Rust side starts the daemon in-p
 forwards its event stream to the webview as Tauri events, and proxies API calls through an
 `api` command so the bearer token never enters the webview and there is no CORS surface.
 Incoming offers appear as a modal; the transfer list updates live from SSE; drag & drop sends
-to the selected device.
+to the selected device, and **Send files…** / **Send folder…** cover the picker flows.
 
 Linux needs the usual Tauri deps (`webkit2gtk-4.1`, `gtk+-3.0`, `libsoup-3.0`,
 `javascriptcoregtk-4.1`).
@@ -155,6 +158,7 @@ crates/
     net.rs          QUIC endpoints, TLS 1.3, certificate pinning verifier
     client.rs       sender
     server.rs       receiver
+    source.rs       expand files and folders into relative-path file lists
     progress.rs     byte counter + live meter, optional progress sink
     trust.rs        trusted.json: remember/forget/list by device id
     approval.rs     request/decision channel + default TTY prompt
@@ -186,7 +190,7 @@ One QUIC connection per transfer session, ALPN `quicdrop/1`.
   | Frame | Direction | Purpose |
   | --- | --- | --- |
   | `Hello` | sender → receiver → sender | protocol version, device id, display name |
-  | `Offer` | sender → receiver | session id + `FileMeta{id,name,size,hash?}` list |
+  | `Offer` | sender → receiver | session id + `FileMeta{id,name,size,hash?}` list (`name` may be a `/`-separated relative path) |
   | `Accept` / `Reject` | receiver → sender | per-file byte offset to resume from |
   | `Complete` | receiver → sender | total bytes written |
   | `Error` / `Bye` | either | terminal states |
@@ -211,9 +215,11 @@ No PKI, no pairing codes. Identity is the certificate:
 4. The receiver gates every offer on the trust store / approval policy before creating any
    file, so a declined transfer leaves nothing behind.
 
-Transport is TLS 1.3 with ALPN. Incoming file names are sanitized (`util::sanitize_file_name`)
-so a sender cannot write outside the destination directory, and existing files are never
-overwritten — `name (1).ext` is chosen instead.
+Transport is TLS 1.3 with ALPN. Incoming names are treated as untrusted relative paths:
+`util::sanitize_rel_path` drops empty, `.` and `..` components (and caps depth at 64) before
+the receiver joins them onto the destination directory, so a sender cannot write outside it
+(covered by `tests/folder_transfer.rs`). Folders are recreated with `create_dir_all`;
+existing files are never overwritten — `name (1).ext` is chosen instead.
 
 Known gap: the receiver learns the sender's `device_id` from the `Hello` frame without
 cryptographic proof (the sender does not present a client certificate yet). See roadmap.
@@ -225,7 +231,7 @@ cryptographic proof (the sender does not present a client certificate yet). See 
 - [x] Tauri v2 desktop shell.
 - [ ] Mutual authentication: sender signs a session nonce with its identity key, receiver
       pins it too.
-- [ ] Directory transfer (recursive walk, preserve relative paths).
+- [x] Directory transfer (recursive walk, preserve relative paths).
 - [ ] Persisted session tickets → 0-RTT on reconnect.
 - [ ] Clipboard/text transfer.
 - [ ] Android/iOS frontends on the same core.

@@ -44,27 +44,70 @@ pub fn human_age(unix_secs: u64) -> String {
     }
 }
 
-/// Strip any directory component and hostile characters from a peer supplied name.
+/// Maximum nesting depth accepted from a peer supplied relative path.
+const MAX_PATH_DEPTH: usize = 64;
+
+/// Turn a peer supplied relative path into a path that is safe to join onto the
+/// receive directory.
 ///
-/// A receiver must never trust the sender's filename: `../../.ssh/authorized_keys` is a
-/// perfectly valid name to receive over the wire.
-pub fn sanitize_file_name(name: &str) -> String {
-    let base = name
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or("file")
-        .trim_matches('\0')
-        .trim();
-    let cleaned: String = base
-        .chars()
-        .filter(|c| !c.is_control() && *c != '\0')
-        .collect();
-    let cleaned = cleaned.trim_start_matches('.').trim();
-    if cleaned.is_empty() {
-        "unnamed".to_string()
-    } else {
-        cleaned.to_string()
+/// A receiver must never trust the sender's name: `../../.ssh/authorized_keys` is a
+/// perfectly valid name to receive over the wire. Empty, `.` and `..` components are
+/// dropped, so the result can only ever point inside the directory it is joined onto.
+/// Returns `unnamed` when nothing usable is left.
+pub fn sanitize_rel_path(name: &str) -> PathBuf {
+    let mut out = PathBuf::new();
+    let mut depth = 0usize;
+    for raw in name.split(['/', '\\']) {
+        if depth >= MAX_PATH_DEPTH {
+            break;
+        }
+        let part = raw.trim_matches('\0').trim();
+        if part.is_empty() || part == "." || part == ".." {
+            continue;
+        }
+        let mut cleaned: String = part
+            .chars()
+            .filter(|c| !c.is_control() && *c != '\0')
+            .collect();
+        // Windows refuses these in a file name, and a drive prefix must never survive.
+        if cfg!(windows) {
+            cleaned = cleaned
+                .chars()
+                .filter(|c| !matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*'))
+                .collect();
+        }
+        let cleaned = cleaned.trim_start_matches('.').trim();
+        if cleaned.is_empty() {
+            continue;
+        }
+        out.push(cleaned);
+        depth += 1;
     }
+    if out.as_os_str().is_empty() {
+        PathBuf::from("unnamed")
+    } else {
+        out
+    }
+}
+
+/// Wire (forward slash) form of a relative path.
+pub fn wire_path(path: &Path) -> String {
+    path.components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Strip any directory component and hostile characters from a peer supplied name.
+pub fn sanitize_file_name(name: &str) -> String {
+    sanitize_rel_path(name)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "unnamed".to_string())
 }
 
 /// Pick a non existing path by appending ` (n)` before the extension.
@@ -128,6 +171,33 @@ mod tests {
     #[test]
     fn keeps_plain_names() {
         assert_eq!(sanitize_file_name("holiday photo.jpg"), "holiday photo.jpg");
+    }
+
+    #[test]
+    fn keeps_safe_relative_paths() {
+        assert_eq!(
+            sanitize_rel_path("photos/2024/a.jpg"),
+            Path::new("photos").join("2024").join("a.jpg")
+        );
+        assert_eq!(wire_path(&sanitize_rel_path("a\\b\\c.txt")), "a/b/c.txt");
+    }
+
+    #[test]
+    fn neutralises_traversal_in_relative_paths() {
+        assert_eq!(
+            sanitize_rel_path("../../etc/passwd"),
+            Path::new("etc").join("passwd")
+        );
+        assert_eq!(sanitize_rel_path("/"), PathBuf::from("unnamed"));
+        assert_eq!(sanitize_rel_path("a/./../b"), PathBuf::from("a").join("b"));
+        assert_eq!(sanitize_rel_path(".hidden/x"), PathBuf::from("hidden").join("x"));
+    }
+
+    #[test]
+    fn caps_relative_depth() {
+        let deep = vec!["d"; 200].join("/");
+        let path = sanitize_rel_path(&deep);
+        assert_eq!(path.components().count(), MAX_PATH_DEPTH);
     }
 
     #[test]

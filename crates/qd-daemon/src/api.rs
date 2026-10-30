@@ -259,8 +259,8 @@ async fn send(
     }
     for path in &body.paths {
         match std::fs::metadata(path) {
-            Ok(meta) if meta.is_file() => {}
-            Ok(_) => return Err(bad_request(format!("not a file: {}", path.display()))),
+            Ok(meta) if meta.is_file() || meta.is_dir() => {}
+            Ok(_) => return Err(bad_request(format!("not a file or folder: {}", path.display()))),
             Err(e) => {
                 return Err(bad_request(format!("cannot read {}: {e}", path.display())))
             }

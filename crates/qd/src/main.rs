@@ -55,9 +55,9 @@ enum Command {
         #[arg(long, value_enum, default_value_t = PolicyArg::Ask)]
         policy: PolicyArg,
     },
-    /// Send one or more files to a peer
+    /// Send files or folders to a peer
     Send {
-        /// Files to send
+        /// Files and folders to send (folders are walked recursively)
         #[arg(required = true)]
         paths: Vec<PathBuf>,
 

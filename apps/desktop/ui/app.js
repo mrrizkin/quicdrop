@@ -297,14 +297,29 @@ async function sendToSelected() {
   }
 }
 
-async function sendPaths(peer, paths) {
+async function sendFolderToSelected() {
+  const peer = peerByKey(state.selectedPeer);
+  if (!peer) {
+    toast("Select a device first.");
+    return;
+  }
+  try {
+    const dir = await invoke("pick_folder");
+    if (!dir) return;
+    await sendPaths(peer, [dir], `Sending folder to ${peer.name}…`);
+  } catch (error) {
+    toast(`Could not open the folder picker: ${error}`);
+  }
+}
+
+async function sendPaths(peer, paths, message) {
   try {
     await api("POST", "/api/send", {
       to: peer.addr,
       paths,
       concurrency: 4,
     });
-    toast(`Sending ${paths.length} file(s) to ${peer.name}`);
+    toast(message || `Sending to ${peer.name}…`);
   } catch (error) {
     toast(`Send failed: ${error}`);
   }
@@ -348,6 +363,7 @@ async function saveSettings() {
 /* ---------- wiring ---------- */
 
 $("btn-send").addEventListener("click", sendToSelected);
+$("btn-send-folder").addEventListener("click", sendFolderToSelected);
 $("btn-settings").addEventListener("click", openSettings);
 $("settings-cancel").addEventListener("click", () => ($("settings-modal").hidden = true));
 $("settings-save").addEventListener("click", saveSettings);

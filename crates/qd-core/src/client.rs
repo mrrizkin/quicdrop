@@ -54,20 +54,26 @@ pub async fn send(opts: SendOpts) -> Result<Summary> {
         bail!("nothing to send");
     }
 
-    let mut metas = Vec::with_capacity(opts.files.len());
+    let mut metas = Vec::new();
+    let mut paths: Vec<PathBuf> = Vec::new();
     let mut total = 0u64;
-    for (i, path) in opts.files.iter().enumerate() {
-        let meta = std::fs::metadata(path).with_context(|| format!("stat {}", path.display()))?;
-        if !meta.is_file() {
-            bail!("not a regular file: {}", path.display());
-        }
-        total += meta.len();
+    // Walking a folder can touch thousands of entries: keep it off the runtime.
+    let inputs = opts.files.clone();
+    let sources = tokio::task::spawn_blocking(move || crate::source::expand(&inputs))
+        .await
+        .context("scan input paths")??;
+    for (i, src) in sources.iter().enumerate() {
+        total += src.size;
         metas.push(FileMeta {
             id: i as u32,
-            name: file_label(path),
-            size: meta.len(),
+            name: src.name.clone(),
+            size: src.size,
             hash: None,
         });
+        paths.push(src.path.clone());
+    }
+    if metas.is_empty() {
+        bail!("nothing to send");
     }
 
     let client_cfg = crate::net::client_config(opts.device_id.clone())?;
@@ -151,7 +157,7 @@ pub async fn send(opts: SendOpts) -> Result<Summary> {
     let semaphore = Arc::new(Semaphore::new(opts.concurrency.max(1)));
     let mut tasks = Vec::new();
     for item in accepted {
-        let path = match opts.files.get(item.id as usize) {
+        let path = match paths.get(item.id as usize) {
             Some(p) => p.clone(),
             None => continue,
         };
@@ -287,13 +293,6 @@ async fn send_one(
     }
     debug!("{} sent in {:?}", meta.name, started.elapsed());
     Ok(sent)
-}
-
-fn file_label(path: &Path) -> String {
-    path.file_name()
-        .and_then(|n| n.to_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| path.display().to_string())
 }
 
 fn new_session_id() -> [u8; 16] {
