@@ -1,9 +1,5 @@
-//! QUIC endpoints, TLS configuration and certificate pinning.
-//!
-//! Certificates are self-signed, so PKI verification is replaced by *identity pinning*:
-//! the device id advertised over discovery is the blake3 fingerprint of the peer's
-//! certificate. A peer that cannot present a certificate hashing to the id it announced
-//! is rejected during the handshake.
+//! QUIC endpoints and TLS pinning: the advertised device id is the blake3 fingerprint of the
+//! peer certificate, so a peer that presents a different cert fails the handshake.
 
 use anyhow::{Context, Result};
 use quinn::rustls;
@@ -25,8 +21,7 @@ pub fn transport_config() -> quinn::TransportConfig {
     let mut t = quinn::TransportConfig::default();
     t.max_concurrent_bidi_streams(quinn::VarInt::from_u32(128));
     t.max_concurrent_uni_streams(quinn::VarInt::from_u32(32));
-    // Per stream window must comfortably exceed the chunk size, otherwise the sender
-    // stalls every chunk waiting for flow control updates.
+    // Per-stream window must exceed the chunk size or every chunk stalls on flow control.
     t.stream_receive_window(quinn::VarInt::from_u32(8 * 1024 * 1024));
     t.receive_window(quinn::VarInt::from_u32(64 * 1024 * 1024));
     t.send_window(32 * 1024 * 1024);
@@ -45,8 +40,7 @@ pub fn server_config(identity: &Identity) -> Result<quinn::ServerConfig> {
         .with_single_cert(identity.cert_chain(), identity.private_key())
         .context("rustls server cert")?;
     crypto.alpn_protocols = vec![ALPN.to_vec()];
-    // Allow 0-RTT so a peer that already completed a handshake can start sending
-    // immediately on reconnect.
+    // 0-RTT lets a peer that already completed a handshake send immediately.
     crypto.max_early_data_size = u32::MAX;
 
     let quic_crypto = quinn::crypto::rustls::QuicServerConfig::try_from(crypto)
@@ -56,8 +50,8 @@ pub fn server_config(identity: &Identity) -> Result<quinn::ServerConfig> {
     Ok(cfg)
 }
 
-/// Build a client config that only accepts a peer whose certificate fingerprint matches
-/// `expected_device_id` (prefix match is allowed so users can pass a short id).
+/// Client config that only accepts a certificate matching `expected_device_id` (prefix
+/// allowed so users can pass a short id).
 pub fn client_config(expected_device_id: Option<String>) -> Result<quinn::ClientConfig> {
     let provider = provider();
     let verifier = Arc::new(PinnedVerifier {

@@ -3,6 +3,7 @@ name = "qd-daemon"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "quicdrop daemon: local JSON/SSE API over the transfer engine"
 
 [[bin]]

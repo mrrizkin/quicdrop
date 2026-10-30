@@ -3,6 +3,7 @@ name = "qd"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "QUIC Drop CLI - fast file transfer over your local network"
 
 [[bin]]

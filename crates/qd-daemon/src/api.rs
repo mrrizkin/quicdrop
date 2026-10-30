@@ -163,7 +163,10 @@ async fn peers(State(inner): State<Arc<Inner>>) -> Json<Vec<PeerView>> {
     Json(inner.peers())
 }
 
-async fn transfers(State(inner): State<Arc<Inner>>, Query(q): Query<Limit>) -> Json<Vec<TransferView>> {
+async fn transfers(
+    State(inner): State<Arc<Inner>>,
+    Query(q): Query<Limit>,
+) -> Json<Vec<TransferView>> {
     Json(inner.transfers(q.limit.unwrap_or(50).clamp(1, 200)))
 }
 
@@ -260,10 +263,13 @@ async fn send(
     for path in &body.paths {
         match std::fs::metadata(path) {
             Ok(meta) if meta.is_file() || meta.is_dir() => {}
-            Ok(_) => return Err(bad_request(format!("not a file or folder: {}", path.display()))),
-            Err(e) => {
-                return Err(bad_request(format!("cannot read {}: {e}", path.display())))
+            Ok(_) => {
+                return Err(bad_request(format!(
+                    "not a file or folder: {}",
+                    path.display()
+                )))
             }
+            Err(e) => return Err(bad_request(format!("cannot read {}: {e}", path.display()))),
         }
     }
     let id = spawn_send(

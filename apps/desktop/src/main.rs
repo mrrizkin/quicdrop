@@ -1,8 +1,5 @@
-//! QuicDrop desktop: a thin Tauri shell around the in-process quicdrop daemon.
-//!
-//! The webview never talks to the daemon socket directly. Instead it calls the
-//! `api` command, which forwards to `127.0.0.1` with the bearer token, so the
-//! token never enters the webview and there is no CORS surface.
+//! Tauri shell around the in-process daemon. The webview calls an `api` command instead of
+//! the socket, so the bearer token never reaches it.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -57,8 +54,7 @@ async fn do_api(
     let value: Value = if text.trim().is_empty() {
         Value::Null
     } else {
-        serde_json::from_str(&text)
-            .unwrap_or_else(|_| json!({ "error": text }))
+        serde_json::from_str(&text).unwrap_or_else(|_| json!({ "error": text }))
     };
     if status.is_success() {
         Ok(value)

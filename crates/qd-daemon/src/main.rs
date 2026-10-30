@@ -8,7 +8,11 @@ use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
-#[command(name = "quicdropd", version, about = "quicdrop daemon: local API for the desktop app")]
+#[command(
+    name = "quicdropd",
+    version,
+    about = "quicdrop daemon: local API for the desktop app"
+)]
 struct Cli {
     /// HTTP API address (loopback by default)
     #[arg(long, default_value = "127.0.0.1:53319")]
@@ -85,7 +89,12 @@ async fn main() -> Result<()> {
     let daemon = Daemon::start(cfg).await?;
     println!("quicdropd api: http://{}", daemon.addr);
     println!("api token:     {}", daemon.token);
-    println!("daemon info:   {}", qd_core::Identity::config_dir().join("daemon.json").display());
+    println!(
+        "daemon info:   {}",
+        qd_core::Identity::config_dir()
+            .join("daemon.json")
+            .display()
+    );
     println!("press ctrl+c to stop\n");
 
     tokio::select! {

@@ -48,7 +48,10 @@ impl Harness {
         let (dec_tx, mut dec_rx) = mpsc::unbounded_channel::<Decision>();
         tokio::spawn(async move {
             while let Some(request) = req_rx.recv().await {
-                let decision = dec_rx.recv().await.unwrap_or_else(|| Decision::reject("test"));
+                let decision = dec_rx
+                    .recv()
+                    .await
+                    .unwrap_or_else(|| Decision::reject("test"));
                 let _ = request.reply.send(decision);
             }
         });
@@ -117,7 +120,10 @@ async fn approval_accept_reject_and_remember() -> Result<()> {
     let nope = harness.source("nope.bin", &[7u8; 4096]);
     harness.decisions.send(Decision::reject("not now"))?;
     let rejected = harness.send(&nope).await;
-    assert!(rejected.is_err(), "sender should learn the transfer was rejected");
+    assert!(
+        rejected.is_err(),
+        "sender should learn the transfer was rejected"
+    );
     assert!(harness.received("nope.bin").is_none());
 
     // 3. Always: remembered, then a second transfer skips the prompt entirely.

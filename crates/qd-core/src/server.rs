@@ -36,7 +36,7 @@ pub struct ServerOpts {
     pub discovery_port: u16,
     pub out_dir: PathBuf,
     pub name: Option<String>,
-    /// Answer discovery probes with a summary of what is on disk (unused placeholder).
+    /// Suppress the receiver's progress meter.
     pub quiet: bool,
     /// Policy for devices that are not in the trust store.
     pub policy: Policy,
@@ -380,14 +380,13 @@ async fn handle_connection(
 
     let out_dir = opts.effective_out_dir();
 
-    // Decide destination paths *before* accepting so the offsets we report are the
-    // offsets we will actually append to.
+    // Decide destination paths before accepting: the offsets we report are the ones we
+    // will append to.
     let mut plan: Vec<PlannedFile> = Vec::with_capacity(files.len());
     let mut accepted: Vec<AcceptFile> = Vec::with_capacity(files.len());
     let mut total: u64 = 0;
     for meta in files {
-        // Senders may announce `folder/sub/file.txt`; sanitising strips traversal and
-        // we recreate the folders below the receive directory.
+        // Senders may announce `folder/sub/file.txt`; folders are recreated below out_dir.
         let rel = sanitize_rel_path(&meta.name);
         let label = wire_path(&rel);
         let file_name = rel
@@ -562,8 +561,7 @@ async fn handle_connection(
         }
     );
 
-    // Wait for the sender to close the control stream (it sends Bye after it has
-    // read every file ack). Closing the connection earlier can drop those acks.
+    // Wait for `Bye` so file acks still in flight are not dropped by the close.
     let _ = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         ctrl_recv.read_to_end(64 * 1024),
@@ -583,10 +581,8 @@ async fn handle_connection(
     Ok(())
 }
 
-/// Decide whether to accept a transfer from `peer_id`.
-///
-/// Trusted devices are accepted silently, unknown ones follow `opts.policy`, and
-/// anything we cannot answer fails closed with a reason the sender can show.
+/// Trusted devices are accepted silently, unknown ones follow `opts.policy`, and anything
+/// we cannot answer fails closed with a reason the sender can show.
 async fn decide(
     policy: Policy,
     opts: &ServerOpts,
@@ -641,10 +637,7 @@ async fn decide(
         }
         Ok(Ok(decision)) => decision,
         Ok(Err(_)) => Decision::reject("receiver did not answer"),
-        Err(_) => Decision::reject(format!(
-            "no answer within {}s",
-            APPROVAL_TIMEOUT.as_secs()
-        )),
+        Err(_) => Decision::reject(format!("no answer within {}s", APPROVAL_TIMEOUT.as_secs())),
     }
 }
 
@@ -679,8 +672,7 @@ async fn receive_file(
         .await
         .with_context(|| format!("open {}", planned.dest.display()))?;
 
-    // Hash whatever prefix already exists so resume produces the same digest as a
-    // one-shot transfer.
+    // Hash the existing prefix so resume produces the same digest as a one-shot transfer.
     let mut hasher = blake3::Hasher::new();
     if offset > 0 {
         file.set_len(offset).await?;

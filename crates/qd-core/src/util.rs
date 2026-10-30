@@ -190,7 +190,10 @@ mod tests {
         );
         assert_eq!(sanitize_rel_path("/"), PathBuf::from("unnamed"));
         assert_eq!(sanitize_rel_path("a/./../b"), PathBuf::from("a").join("b"));
-        assert_eq!(sanitize_rel_path(".hidden/x"), PathBuf::from("hidden").join("x"));
+        assert_eq!(
+            sanitize_rel_path(".hidden/x"),
+            PathBuf::from("hidden").join("x")
+        );
     }
 
     #[test]

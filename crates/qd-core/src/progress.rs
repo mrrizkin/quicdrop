@@ -1,3 +1,5 @@
+//! Byte counting for the terminal meter and for embedders that want live progress.
+
 use std::io::{IsTerminal, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -7,8 +9,7 @@ use crate::util::{human_bytes, human_rate};
 
 /// Observer for transfer progress, called with `(done, total)`.
 ///
-/// Sinks are throttled to ~10 updates per second (plus one final update) so a
-/// GUI or event stream is not flooded by 512 KiB chunks.
+/// Throttled to ~10 updates per second (plus one final update) so a GUI is not flooded.
 pub type ProgressSink = Arc<dyn Fn(u64, u64) + Send + Sync>;
 
 /// Shared byte counter plus a live progress line on stderr.

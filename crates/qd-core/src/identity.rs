@@ -5,11 +5,7 @@ use std::path::PathBuf;
 
 use crate::util::hostname;
 
-/// Long-lived device identity.
-///
-/// The device id is derived from the certificate fingerprint, so it is stable for as
-/// long as the key material is kept. Peers pin the id the first time they see a device
-/// and can then detect an impostor presenting the same name with a different cert.
+/// Long-lived identity. The device id is the certificate fingerprint, so peers can pin it.
 #[derive(Debug, Clone)]
 pub struct Identity {
     pub device_id: String,
@@ -126,8 +122,8 @@ fn build_cert(name: &str, key: &KeyPair) -> Result<(CertificateParams, Vec<u8>)>
     params
         .distinguished_name
         .push(DnType::OrganizationName, "quicdrop");
-    // Keep validity deterministic so the DER (and therefore the device id) is stable
-    // when the certificate is regenerated from the same key.
+    // Fixed validity keeps the DER, and therefore the device id, stable when the
+    // certificate is regenerated from the same key.
     params.not_before = date_time_ymd(2020, 1, 1);
     params.not_after = date_time_ymd(9999, 12, 31);
     let cert = params.self_signed(key).context("self-sign certificate")?;

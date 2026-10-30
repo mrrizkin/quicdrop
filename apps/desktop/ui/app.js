@@ -15,7 +15,6 @@ const state = {
 
 const $ = (id) => document.getElementById(id);
 
-/* ---------- tiny helpers ---------- */
 
 const esc = (value) =>
   String(value ?? "").replace(/[&<>"']/g, (c) => ({
@@ -96,7 +95,6 @@ function rateFor(transfer) {
   return rate;
 }
 
-/* ---------- theme ---------- */
 
 const THEME_KEY = "quicdrop-theme";
 
@@ -138,7 +136,6 @@ async function api(method, path, body) {
   return invoke("api", { method, path, body: body ?? null });
 }
 
-/* ---------- data ---------- */
 
 async function refresh() {
   try {
@@ -186,7 +183,6 @@ function applyTrust() {
   state.peers.forEach((p) => (p.trusted = trusted.has(p.device_id)));
 }
 
-/* ---------- rendering ---------- */
 
 function renderAll() {
   renderDevice();
@@ -402,7 +398,6 @@ function renderApproval() {
   $("approval-always").onclick = () => respond(true, true);
 }
 
-/* ---------- actions ---------- */
 
 async function sendToSelected() {
   const peer = peerByKey(state.selectedPeer);
@@ -482,7 +477,6 @@ async function saveSettings() {
   }
 }
 
-/* ---------- wiring ---------- */
 
 $("btn-theme").addEventListener("click", toggleTheme);
 $("settings-close").addEventListener("click", () => ($("settings-modal").hidden = true));
@@ -506,7 +500,6 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
-/* ---------- daemon events ---------- */
 
 async function handleEvent(payload) {
   if (!payload || !payload.type) return;

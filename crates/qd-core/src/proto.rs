@@ -1,3 +1,6 @@
+//! Wire format: length-prefixed postcard frames, plus the header, trailer and ack that
+//! bracket a file stream.
+
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
@@ -23,8 +26,7 @@ pub struct FileMeta {
     /// Original file name as advertised by the sender (untrusted).
     pub name: String,
     pub size: u64,
-    /// blake3 of the whole file, hex encoded. `None` means the digest arrives as a
-    /// [`FileTrailer`] after the payload, so the sender never needs a second read pass.
+    /// blake3 of the whole file, hex encoded. `None` means the digest arrives in a [`FileTrailer`].
     pub hash: Option<String>,
 }
 

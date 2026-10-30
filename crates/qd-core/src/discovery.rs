@@ -1,13 +1,5 @@
-//! Peer discovery.
-//!
-//! Two independent mechanisms run at the same time, because neither works everywhere:
-//!
-//! * **mDNS** (`_quicdrop._udp.local.`) — zero config, resolves names, but dies on networks
-//!   that filter multicast or on APs with client isolation.
-//! * **UDP broadcast/multicast beacon** — dumb and predictable, survives most campus/office
-//!   LANs, carries the device id in the payload so no name resolution is required.
-//!
-//! Duplicate sightings of the same device are merged by `device_id`.
+//! Peer discovery. mDNS and a UDP beacon run together because networks block one or the
+//! other; sightings are merged by `device_id`.
 
 use anyhow::{Context, Result};
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
@@ -99,7 +91,6 @@ pub async fn start(
         .find(|ip| matches!(ip, IpAddr::V4(v4) if !v4.is_loopback()))
         .copied();
 
-    // ---- mDNS -------------------------------------------------------------
     let daemon = ServiceDaemon::new().context("create mDNS daemon")?;
     let instance = format!("{}-{}", identity.name, identity.short_id());
     let host = format!("{}.local.", sanitize_host(&identity.name));
@@ -125,58 +116,56 @@ pub async fn start(
     {
         let tx = tx.clone();
         let me = identity.device_id.clone();
-        // A dedicated thread, not a runtime blocking task: this loop lives as
-        // long as the mDNS daemon does and must not stall runtime shutdown.
+        // Own thread: this loop outlives the runtime and must not stall shutdown.
         std::thread::Builder::new()
             .name("qd-mdns".into())
             .spawn(move || {
-            while let Ok(event) = browse.recv() {
-                if let ServiceEvent::ServiceResolved(info) = event {
-                    let device_id = info
-                        .txt_properties
-                        .get_property_val_str("id")
-                        .unwrap_or_default()
-                        .to_string();
-                    if device_id.is_empty() || device_id == me {
-                        continue;
-                    }
-                    let name = info
-                        .txt_properties
-                        .get_property_val_str("name")
-                        .unwrap_or("unknown")
-                        .to_string();
-                    let platform = info
-                        .txt_properties
-                        .get_property_val_str("platform")
-                        .unwrap_or("unknown")
-                        .to_string();
-                    let addrs: Vec<SocketAddr> = info
-                        .addresses
-                        .iter()
-                        .map(|a| SocketAddr::new(a.to_ip_addr(), info.port))
-                        .collect();
-                    for addr in addrs {
-                        let peer = Peer {
-                            device_id: device_id.clone(),
-                            name: name.clone(),
-                            platform: platform.clone(),
-                            quic_port: info.port,
-                            addr,
-                            source: "mdns",
-                            last_seen: Instant::now(),
-                        };
-                        trace!("mdns peer {peer}");
-                        if tx.send(peer).is_err() {
-                            return;
+                while let Ok(event) = browse.recv() {
+                    if let ServiceEvent::ServiceResolved(info) = event {
+                        let device_id = info
+                            .txt_properties
+                            .get_property_val_str("id")
+                            .unwrap_or_default()
+                            .to_string();
+                        if device_id.is_empty() || device_id == me {
+                            continue;
+                        }
+                        let name = info
+                            .txt_properties
+                            .get_property_val_str("name")
+                            .unwrap_or("unknown")
+                            .to_string();
+                        let platform = info
+                            .txt_properties
+                            .get_property_val_str("platform")
+                            .unwrap_or("unknown")
+                            .to_string();
+                        let addrs: Vec<SocketAddr> = info
+                            .addresses
+                            .iter()
+                            .map(|a| SocketAddr::new(a.to_ip_addr(), info.port))
+                            .collect();
+                        for addr in addrs {
+                            let peer = Peer {
+                                device_id: device_id.clone(),
+                                name: name.clone(),
+                                platform: platform.clone(),
+                                quic_port: info.port,
+                                addr,
+                                source: "mdns",
+                                last_seen: Instant::now(),
+                            };
+                            trace!("mdns peer {peer}");
+                            if tx.send(peer).is_err() {
+                                return;
+                            }
                         }
                     }
                 }
-            }
             })
             .context("spawn mDNS reader")?;
     }
 
-    // ---- UDP beacon -------------------------------------------------------
     let socket = bind_discovery_socket(disc_port, primary)?;
     let socket = Arc::new(socket);
 

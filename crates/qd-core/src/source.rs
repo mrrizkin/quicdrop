@@ -1,10 +1,5 @@
-//! Turn command line / API paths into the flat list of files we will send.
-//!
-//! Folder support lives here: the wire protocol only ever sees files, each one
-//! carrying a `/` separated relative path in [`FileMeta::name`]. The receiver
-//! sanitises that path and recreates the folders.
-//!
-//! [`FileMeta::name`]: crate::proto::FileMeta::name
+//! Expand paths into the file list a sender offers: folders are walked, and each file
+//! carries a relative path the receiver recreates.
 
 use anyhow::{bail, Context, Result};
 use std::collections::HashSet;
@@ -34,10 +29,16 @@ pub fn expand(inputs: &[PathBuf]) -> Result<Vec<SourceFile>> {
     let mut seen: HashSet<PathBuf> = HashSet::new();
 
     for input in inputs {
-        let meta = std::fs::metadata(input)
-            .with_context(|| format!("cannot read {}", input.display()))?;
+        let meta =
+            std::fs::metadata(input).with_context(|| format!("cannot read {}", input.display()))?;
         if meta.is_file() {
-            add_file(&mut out, &mut seen, input.clone(), root_name(input, "file"), meta.len())?;
+            add_file(
+                &mut out,
+                &mut seen,
+                input.clone(),
+                root_name(input, "file"),
+                meta.len(),
+            )?;
         } else if meta.is_dir() {
             let root = root_name(input, "folder");
             walk(input, Path::new(&root), 0, &mut out, &mut seen)?;
@@ -76,9 +77,9 @@ fn walk(
     entries.sort_by_key(|e| e.file_name());
 
     for entry in entries {
-        let file_type = entry.file_type().with_context(|| {
-            format!("cannot inspect {}", entry.path().display())
-        })?;
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("cannot inspect {}", entry.path().display()))?;
         let rel_child = rel.join(entry.file_name());
         if file_type.is_symlink() {
             // Never follow: a link could point outside the selected folder or loop.
@@ -145,11 +146,7 @@ mod tests {
         let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(
             names,
-            vec![
-                "photos/2024/b.jpg",
-                "photos/2024/raw/c.jpg",
-                "photos/a.jpg"
-            ]
+            vec!["photos/2024/b.jpg", "photos/2024/raw/c.jpg", "photos/a.jpg"]
         );
         assert_eq!(files.iter().map(|f| f.size).sum::<u64>(), 6);
         std::fs::remove_dir_all(&dir).unwrap();
@@ -163,8 +160,12 @@ mod tests {
         std::fs::create_dir_all(&folder).unwrap();
         std::fs::write(folder.join("inner.txt"), b"y").unwrap();
 
-        let files = expand(&[dir.join("loose.txt"), folder.clone(), folder.join("inner.txt")])
-            .unwrap();
+        let files = expand(&[
+            dir.join("loose.txt"),
+            folder.clone(),
+            folder.join("inner.txt"),
+        ])
+        .unwrap();
         let names: Vec<&str> = files.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, vec!["loose.txt", "folder/inner.txt"]);
         std::fs::remove_dir_all(&dir).unwrap();

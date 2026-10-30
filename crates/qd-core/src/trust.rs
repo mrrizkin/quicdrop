@@ -1,8 +1,4 @@
-//! Persistent trust store: devices that may send files without being prompted.
-//!
-//! The store is a small JSON file inside the config dir, keyed by the sender's
-//! certificate fingerprint (the `device_id`). It is deliberately boring: no
-//! secrets, no expiry, easy to inspect and delete by hand.
+//! Trust store: `trusted.json` keyed by device id. No secrets, no expiry, easy to delete.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};

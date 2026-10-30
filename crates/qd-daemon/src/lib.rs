@@ -1,10 +1,5 @@
-//! quicdrop daemon: exposes the transfer engine over a local JSON/SSE API.
-//!
-//! The daemon owns the QUIC endpoint, discovery, approval flow and a small
-//! in-memory history. It is meant to be embedded: the CLI (`quicdropd`) starts
-//! it standalone, the Tauri app starts it in-process. Everything that changes
-//! state is behind a bearer token written to `daemon.json` (mode 0600) next to
-//! the identity, and the listener binds loopback by default.
+//! Daemon: the transfer engine behind a loopback JSON/SSE API, embedded by `quicdropd` and
+//! the desktop app. State changes require the bearer token written to `daemon.json`.
 
 use anyhow::{Context, Result};
 use qd_core::approval::{self, ApprovalRequest, Decision, APPROVAL_TIMEOUT};
@@ -419,7 +414,8 @@ impl Daemon {
         let (approver, approval_rx) = approval::channel();
         tokio::spawn(approval_forwarder(inner.clone(), approval_rx));
 
-        let mut opts = server::ServerOpts::new(cfg.quic_port, cfg.discovery_port, cfg.out_dir.clone());
+        let mut opts =
+            server::ServerOpts::new(cfg.quic_port, cfg.discovery_port, cfg.out_dir.clone());
         opts.name = cfg.name.clone();
         opts.quiet = cfg.quiet;
         opts.policy = cfg.policy;
@@ -515,7 +511,12 @@ impl Daemon {
         let ours = std::fs::read(&self.info_path)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-            .and_then(|value| value.get("token").and_then(|t| t.as_str()).map(String::from))
+            .and_then(|value| {
+                value
+                    .get("token")
+                    .and_then(|t| t.as_str())
+                    .map(String::from)
+            })
             .map(|token| token == self.token)
             .unwrap_or(false);
         if ours {
@@ -642,13 +643,7 @@ fn server_event_sink(inner: Arc<Inner>) -> ServerEventSink {
             peer_name,
             reason,
         } => {
-            let id = inner.start_transfer(
-                Direction::In,
-                &peer_id,
-                &peer_name,
-                Vec::new(),
-                0,
-            );
+            let id = inner.start_transfer(Direction::In, &peer_id, &peer_name, Vec::new(), 0);
             inner.finish_transfer(&id, TransferStatus::Declined, Some(reason));
         }
     })
@@ -719,9 +714,9 @@ pub async fn resolve_target(
             .lock()
             .map(|p| p.values().cloned().collect())
             .unwrap_or_default();
-        peers.into_iter().find(|p| {
-            p.device_id.starts_with(target) || p.name.to_lowercase().contains(&needle)
-        })
+        peers
+            .into_iter()
+            .find(|p| p.device_id.starts_with(target) || p.name.to_lowercase().contains(&needle))
     };
     if let Some(peer) = known {
         let addr: SocketAddr = peer
@@ -731,7 +726,11 @@ pub async fn resolve_target(
         return Ok((
             addr,
             Some(peer.device_id.clone()),
-            format!("{} ({})", peer.name, &peer.device_id[..8.min(peer.device_id.len())]),
+            format!(
+                "{} ({})",
+                peer.name,
+                &peer.device_id[..8.min(peer.device_id.len())]
+            ),
         ));
     }
 
@@ -842,11 +841,7 @@ pub fn spawn_send(
                 );
             }
             Err(e) => {
-                state.finish_transfer(
-                    &transfer_id,
-                    TransferStatus::Failed,
-                    Some(format!("{e:#}")),
-                );
+                state.finish_transfer(&transfer_id, TransferStatus::Failed, Some(format!("{e:#}")));
             }
         }
     });

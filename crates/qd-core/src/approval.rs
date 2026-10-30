@@ -1,9 +1,5 @@
-//! Receiver-side approval of incoming transfers.
-//!
-//! The server never blocks on a UI directly. It hands an [`ApprovalRequest`] to
-//! whoever owns an [`ApprovalSender`] — the CLI's TTY prompt, the daemon's event
-//! stream, or an embedder — and waits for a [`Decision`] on a oneshot channel.
-//! If nobody answers within [`APPROVAL_TIMEOUT`], the transfer is rejected.
+//! Receiver-side approval: the server hands an [`ApprovalRequest`] to whoever owns the
+//! [`ApprovalSender`] and waits for a [`Decision`]; silence past [`APPROVAL_TIMEOUT`] rejects.
 
 use std::io::{BufRead, IsTerminal, Write};
 use std::sync::Arc;
@@ -44,12 +40,7 @@ impl Decision {
     }
 
     pub fn should_remember(&self) -> bool {
-        matches!(
-            self,
-            Self::Accept {
-                remember: true
-            }
-        )
+        matches!(self, Self::Accept { remember: true })
     }
 }
 
@@ -80,11 +71,7 @@ impl ApprovalRequest {
             human_bytes(self.total_bytes),
         );
         for file in self.files.iter().take(20) {
-            out.push_str(&format!(
-                "\n    {} ({})",
-                file.name,
-                human_bytes(file.size)
-            ));
+            out.push_str(&format!("\n    {} ({})", file.name, human_bytes(file.size)));
         }
         if self.files.len() > 20 {
             out.push_str(&format!("\n    ... and {} more", self.files.len() - 20));
@@ -99,10 +86,8 @@ pub fn channel() -> (ApprovalSender, mpsc::UnboundedReceiver<ApprovalRequest>) {
     mpsc::unbounded_channel()
 }
 
-/// Spawn the default prompt that asks on stdin.
-///
-/// Without a TTY every request is rejected with a clear reason instead of
-/// hanging, so headless receivers fail closed.
+/// Spawn the stdin prompt. Without a TTY every request is rejected, so headless receivers
+/// fail closed.
 pub fn spawn_tty_approver() -> ApprovalSender {
     let (tx, rx) = channel();
     let interactive = std::io::stdin().is_terminal();
@@ -151,7 +136,10 @@ async fn ask_on_tty(req: &ApprovalRequest) -> Decision {
             "y" | "yes" | "" => return Decision::accept(),
             "a" | "always" => return Decision::accept_always(),
             "n" | "no" | "q" | "quit" => {
-                return Decision::reject(format!("\"{}\" was declined by the receiver", req.peer_name))
+                return Decision::reject(format!(
+                    "\"{}\" was declined by the receiver",
+                    req.peer_name
+                ))
             }
             _ if attempt == 2 => break,
             _ => {

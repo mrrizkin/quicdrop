@@ -3,6 +3,7 @@ name = "qd-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "QUIC-based local file transfer core (protocol, discovery, transfer)"
 
 [dependencies]
