@@ -1,0 +1,161 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  cli:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            name: linux-x86_64
+          - os: windows-latest
+            name: windows-x86_64
+          - os: macos-latest
+            name: macos-universal
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: add macos targets
+        if: runner.os == 'macOS'
+        run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
+      - name: build
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            cargo build --release --locked --target universal-apple-darwin -p qd -p qd-daemon
+            dir=target/universal-apple-darwin/release
+          else
+            cargo build --release --locked
+            dir=target/release
+          fi
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          out="quicdrop-${version}-${{ matrix.name }}"
+          mkdir -p "dist/$out"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cp "$dir/qd.exe" "$dir/quicdropd.exe" LICENSE-MIT README.md "dist/$out/"
+          else
+            cp "$dir/qd" "$dir/quicdropd" LICENSE-MIT README.md "dist/$out/"
+          fi
+          tar -C dist -czf "dist/$out.tar.gz" "$out"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            name: linux-x86_64
+          - os: windows-latest
+            name: windows-x86_64
+          - os: macos-latest
+            name: macos-universal
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop
+      - name: install tauri cli
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-binstall
+      - run: cargo binstall -y --no-confirm tauri-cli@^2
+      - name: linux deps
+        if: runner.os == 'Linux'
+        working-directory: .
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
+            librsvg2-dev patchelf libfuse2
+      - name: macos targets
+        if: runner.os == 'macOS'
+        run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
+      - name: build linux
+        if: runner.os == 'Linux'
+        run: cargo tauri build --bundles deb,rpm,appimage
+      - name: build windows
+        if: runner.os == 'Windows'
+        run: cargo tauri build --bundles msi,nsis
+      - name: build macos
+        if: runner.os == 'macOS'
+        run: cargo tauri build --target universal-apple-darwin --bundles app,dmg
+      - name: collect
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' ../Cargo.toml | head -1)
+          out="../dist/quicdrop-${version}-${{ matrix.name }}"
+          mkdir -p "$out"
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            base=target/universal-apple-darwin/release/bundle
+          else
+            base=target/release/bundle
+          fi
+          find "$base" -type f \( -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' \
+            -o -name '*.msi' -o -name '*.exe' -o -name '*.dmg' \) -exec cp {} "$out/" \;
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+
+  arch:
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - run: pacman -Syu --noconfirm git rust gtk3 webkit2gtk-4.1 libsoup3 hicolor-icon-theme
+      - uses: actions/checkout@v4
+      - name: build package
+        run: |
+          useradd -m builder
+          chown -R builder .
+          su builder -c "cd packaging/arch && makepkg -s --noconfirm"
+      - name: collect
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          mkdir -p dist/quicdrop-${version}-arch-x86_64
+          cp packaging/arch/*.pkg.tar.zst dist/quicdrop-${version}-arch-x86_64/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arch-x86_64
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: [cli, desktop, arch]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: checksums
+        run: |
+          cd dist
+          find . -maxdepth 1 -type f ! -name SHA256SUMS -print0 | sort -z \
+            | xargs -0 sha256sum > SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

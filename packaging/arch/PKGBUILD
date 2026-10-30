@@ -1,0 +1,36 @@
+# Maintainer: quicdrop contributors
+pkgname=quicdrop
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Peer-to-peer file transfer over QUIC"
+arch=('x86_64' 'aarch64')
+url="https://github.com/mrrizkin/quicdrop"
+license=('MIT')
+depends=('glibc' 'gcc-libs' 'gtk3' 'webkit2gtk-4.1' 'libsoup3' 'hicolor-icon-theme')
+makedepends=('cargo' 'rust')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "$pkgname-$pkgver"
+  cargo build --release --locked
+  cargo build --release --locked --manifest-path apps/desktop/Cargo.toml
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm755 target/release/qd "$pkgdir/usr/bin/qd"
+  install -Dm755 target/release/quicdropd "$pkgdir/usr/bin/quicdropd"
+  install -Dm755 apps/desktop/target/release/quicdrop-desktop "$pkgdir/usr/bin/quicdrop-desktop"
+
+  install -Dm644 packaging/linux/dev.quicdrop.desktop \
+    "$pkgdir/usr/share/applications/dev.quicdrop.desktop"
+  install -Dm644 packaging/linux/dev.quicdrop.desktop.metainfo.xml \
+    "$pkgdir/usr/share/metainfo/dev.quicdrop.desktop.metainfo.xml"
+  install -Dm644 apps/desktop/icons/128x128.png \
+    "$pkgdir/usr/share/icons/hicolor/128x128/apps/dev.quicdrop.desktop.png"
+  install -Dm644 apps/desktop/icons/128x128@2x.png \
+    "$pkgdir/usr/share/icons/hicolor/256x256/apps/dev.quicdrop.desktop.png"
+
+  install -Dm644 LICENSE-MIT "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

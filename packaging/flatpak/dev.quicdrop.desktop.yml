@@ -1,0 +1,38 @@
+app-id: dev.quicdrop.desktop
+runtime: org.gnome.Platform
+runtime-version: '48'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: quicdrop-desktop
+
+finish-args:
+  - --share=network
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  - --filesystem=xdg-download
+
+modules:
+  - name: quicdrop
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin
+      env:
+        CARGO_HOME: /run/build/quicdrop/cargo
+    build-commands:
+      - cargo --offline build --release --locked --manifest-path apps/desktop/Cargo.toml
+      - install -Dm755 apps/desktop/target/release/quicdrop-desktop /app/bin/quicdrop-desktop
+      - install -Dm644 packaging/linux/dev.quicdrop.desktop
+        /app/share/applications/dev.quicdrop.desktop
+      - install -Dm644 packaging/linux/dev.quicdrop.desktop.metainfo.xml
+        /app/share/metainfo/dev.quicdrop.desktop.metainfo.xml
+      - install -Dm644 apps/desktop/icons/128x128.png
+        /app/share/icons/hicolor/128x128/apps/dev.quicdrop.desktop.png
+      - install -Dm644 apps/desktop/icons/128x128@2x.png
+        /app/share/icons/hicolor/256x256/apps/dev.quicdrop.desktop.png
+    sources:
+      - type: git
+        url: https://github.com/mrrizkin/quicdrop.git
+        tag: v0.1.0
+      - cargo-sources.json

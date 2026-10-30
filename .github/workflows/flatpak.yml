@@ -1,0 +1,41 @@
+name: flatpak
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+      - run: |
+          flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y flathub org.gnome.Platform//48 org.gnome.Sdk//48
+          flatpak install --user -y flathub org.freedesktop.Sdk.Extension.rust-stable//24.08
+      - name: pin manifest to this ref
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          sed -i "s|tag: .*|tag: ${GITHUB_REF_NAME}|" packaging/flatpak/dev.quicdrop.desktop.yml
+      - name: build
+        run: |
+          mkdir -p dist
+          flatpak-builder --user --force-clean --disable-rofiles-fuse \
+            --repo=repo build-dir packaging/flatpak/dev.quicdrop.desktop.yml
+          flatpak build-bundle repo dist/quicdrop.flatpak dev.quicdrop.desktop
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flatpak-x86_64
+          path: dist/*.flatpak
+          if-no-files-found: error
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: dist/*.flatpak

@@ -26,6 +26,20 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": ["icons/icon.png"]
+    "category": "Utility",
+    "shortDescription": "Peer-to-peer file transfer over QUIC",
+    "longDescription": "Fast file transfer on the local network. One QUIC stream per file, per-file resume, and an approval prompt for unknown devices.",
+    "copyright": "Copyright (c) 2026 quicdrop contributors",
+    "licenseFile": "../../LICENSE-MIT",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    }
   }
 }

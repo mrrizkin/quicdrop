@@ -2,7 +2,7 @@
 name = "quicdrop-desktop"
 version = "0.1.0"
 edition = "2021"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 description = "QuicDrop desktop app (Tauri shell around the quicdrop daemon)"
 publish = false
 

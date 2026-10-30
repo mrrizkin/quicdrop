@@ -2,3 +2,9 @@
 /apps/desktop/target
 *.pem
 .env
+/dist
+/packaging/flatpak/build-dir
+/packaging/flatpak/repo
+/packaging/arch/pkg
+/packaging/arch/src
+*.pkg.tar.zst

@@ -12,6 +12,8 @@ just desktop   # run the Tauri app
 - `crates/qd` — `qd` CLI.
 - `crates/qd-daemon` — `quicdropd`: loopback HTTP/SSE API, history, approval plumbing.
 - `apps/desktop` — Tauri shell (outside the workspace) and the buildless `ui/`.
+- `packaging/` — PKGBUILD, Flatpak manifest, shared desktop entry and AppStream data.
+- `.github/workflows/` — `ci` gates, `release` artifacts on `v*` tags, `flatpak` bundle.
 
 ## Rules
 

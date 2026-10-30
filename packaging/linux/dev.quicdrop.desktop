@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=QuicDrop
+GenericName=File Transfer
+Comment=Send files and folders over the local network
+Exec=quicdrop-desktop
+Icon=dev.quicdrop.desktop
+Terminal=false
+Categories=Network;FileTransfer;Utility;
+Keywords=transfer;share;airdrop;localsend;lan;quic;
+StartupWMClass=QuicDrop
