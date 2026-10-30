@@ -31,7 +31,10 @@ pub async fn hash_file_with_size(path: &Path) -> Result<(u64, String)> {
 fn hash_file_with_size_sync(path: &Path) -> Result<(u64, String)> {
     let mut file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
     let mut hasher = blake3::Hasher::new();
-    let mut buf = vec![0u8; HASH_BUFFER];
+    // Size the buffer to the file so a small file does not pay for a full one. A short
+    // read just means another pass.
+    let hint = file.metadata().map(|meta| meta.len()).unwrap_or(0);
+    let mut buf = vec![0u8; (hint as usize).clamp(1, HASH_BUFFER)];
     let mut size = 0u64;
     loop {
         let n = file
