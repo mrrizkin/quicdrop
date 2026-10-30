@@ -127,7 +127,11 @@ jobs:
         run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
       - name: build linux
         if: runner.os == 'Linux'
-        run: cargo tauri build --bundles deb,rpm,appimage
+        # The Linux bundles carry the CLI next to the app; macOS and Windows bundles do not.
+        run: |
+          ../../scripts/stage-sidecars.sh
+          cargo tauri build --bundles deb,rpm,appimage \
+            --config '{"bundle":{"externalBin":["binaries/qd","binaries/quicdropd"]}}'
       - name: build windows
         if: runner.os == 'Windows'
         shell: bash
