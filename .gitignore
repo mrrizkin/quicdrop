@@ -6,6 +6,7 @@
 /packaging/flatpak/build-dir
 /packaging/flatpak/repo
 /packaging/arch/pkg
+/packaging/arch/*.tar.gz
 /packaging/arch/src
 *.pkg.tar.zst
 /apps/desktop/gen
