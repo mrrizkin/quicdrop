@@ -3,7 +3,7 @@
 use anyhow::{bail, Context, Result};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -11,7 +11,7 @@ use tokio::sync::Semaphore;
 use tracing::{debug, info};
 
 use crate::cancel::Cancel;
-use crate::progress::{FileSink, Progress, ProgressSink};
+use crate::progress::{throttle_file_sink, FileSink, Progress, ProgressSink};
 use crate::proto::{self, AcceptFile, FileAck, FileHeader, FileMeta, FileTrailer, Frame};
 use crate::util::{human_bytes, human_rate};
 
@@ -182,6 +182,7 @@ pub async fn send(opts: SendOpts) -> Result<Summary> {
     let reporter_handle = tokio::spawn(async move { reporter.run(quiet).await });
 
     let semaphore = Arc::new(Semaphore::new(opts.concurrency.max(1)));
+    let file_progress = opts.file_progress.clone().map(throttle_file_sink);
     let mut tasks = Vec::new();
     for item in accepted {
         let path = match paths.get(item.id as usize) {
@@ -191,7 +192,7 @@ pub async fn send(opts: SendOpts) -> Result<Summary> {
         let meta = metas[item.id as usize].clone();
         let conn = conn.clone();
         let progress = progress.clone();
-        let file_progress = opts.file_progress.clone();
+        let file_progress = file_progress.clone();
         let permit = semaphore.clone();
         tasks.push(tokio::spawn(async move {
             let _permit = permit.acquire_owned().await;
@@ -286,6 +287,8 @@ async fn send_one(
     let count = proto::chunk_count(offset, meta.size);
     let workers = proto::stream_count(count) as usize;
     let next = Arc::new(AtomicUsize::new(0));
+    // Chunks finish out of order; count the whole file so progress stays monotonic.
+    let file_done = Arc::new(AtomicU64::new(offset));
 
     let mut tasks = Vec::with_capacity(workers);
     for _ in 0..workers {
@@ -297,6 +300,7 @@ async fn send_one(
             offset,
             count,
             next.clone(),
+            file_done.clone(),
             hash.clone(),
             progress.clone(),
             file_progress.clone(),
@@ -328,6 +332,7 @@ async fn send_worker(
     offset: u64,
     count: u16,
     next: Arc<AtomicUsize>,
+    file_done: Arc<AtomicU64>,
     hash: String,
     progress: Arc<Progress>,
     file_progress: Option<FileSink>,
@@ -352,6 +357,7 @@ async fn send_worker(
             &hash,
             &progress,
             &file_progress,
+            &file_done,
         )
         .await?;
     }
@@ -386,6 +392,7 @@ async fn send_chunk(
     hash: &str,
     progress: &Progress,
     file_progress: &Option<FileSink>,
+    file_done: &AtomicU64,
 ) -> Result<u64> {
     let (mut send, mut recv) = conn.open_bi().await.context("open file stream")?;
     proto::write_msg(
@@ -425,7 +432,8 @@ async fn send_chunk(
         written += n as u64;
         progress.add(n as u64);
         if let Some(sink) = file_progress {
-            sink(meta.id, start + written, meta.size);
+            let done = file_done.fetch_add(n as u64, Ordering::Relaxed) + n as u64;
+            sink(meta.id, done, meta.size);
         }
     }
     proto::write_msg(

@@ -14,7 +14,7 @@ use tracing::{debug, error, info, warn};
 use crate::approval::{ApprovalRequest, ApprovalSender, Decision, APPROVAL_TIMEOUT};
 use crate::discovery::{self, Discovery};
 use crate::identity::Identity;
-use crate::progress::Progress;
+use crate::progress::{FileThrottle, Progress};
 use crate::proto::{self, AcceptFile, FileAck, FileHeader, FileMeta, FileTrailer, Frame};
 use crate::trust::TrustStore;
 use crate::util::{human_bytes, human_rate, sanitize_rel_path, unique_path, wire_path};
@@ -177,6 +177,19 @@ fn emit(opts: &ServerOpts, event: ServerEvent) {
     if let Some(sink) = &opts.events {
         sink(event);
     }
+}
+
+/// Throttle file progress; lifecycle events pass through unchanged.
+fn throttle_events(sink: ServerEventSink) -> ServerEventSink {
+    let throttle = Arc::new(FileThrottle::default());
+    Arc::new(move |event| {
+        if let ServerEvent::FileProgress { id, done, size, .. } = &event {
+            if !throttle.should_emit(*id, *done, *size) {
+                return;
+            }
+        }
+        sink(event);
+    })
 }
 
 impl ServerOpts {
@@ -366,6 +379,11 @@ async fn handle_connection(
     identity: Arc<Identity>,
     opts: Arc<ServerOpts>,
 ) -> Result<()> {
+    let opts = {
+        let mut opts = (*opts).clone();
+        opts.events = opts.events.clone().map(throttle_events);
+        Arc::new(opts)
+    };
     let (mut ctrl_send, mut ctrl_recv) = conn.accept_bi().await.context("accept control stream")?;
 
     let hello: Frame = proto::read_msg(&mut ctrl_recv).await?;

@@ -84,22 +84,34 @@ function fmtEta(seconds) {
   return `${Math.ceil(seconds / 3600)}h left`;
 }
 
-/* Smoothed throughput per transfer, fed by the SSE progress events. */
+/* Throughput samples only advance when bytes do; redraws do not decay the rate. */
 const speedSamples = new Map();
+const RATE_WINDOW_MS = 250;
+const RATE_IDLE_MS = 3000;
 
 function rateFor(transfer) {
-  if (transfer.status !== "active") return 0;
-  const now = Date.now();
-  const prev = speedSamples.get(transfer.id);
+  if (transfer.status !== "active") {
+    speedSamples.delete(transfer.id);
+    return 0;
+  }
+  const now = performance.now();
   const bytes = transfer.transferred || 0;
-  if (!prev) {
+  const prev = speedSamples.get(transfer.id);
+  if (!prev || bytes < prev.bytes) {
     speedSamples.set(transfer.id, { bytes, at: now, rate: 0 });
     return 0;
   }
+  if (bytes === prev.bytes) {
+    if (now - prev.at >= RATE_IDLE_MS && prev.rate > 0) {
+      prev.rate *= 0.9;
+      prev.at = now;
+    }
+    return prev.rate;
+  }
   const elapsed = (now - prev.at) / 1000;
-  if (elapsed < 0.3) return prev.rate || 0;
-  const instant = Math.max(0, bytes - prev.bytes) / elapsed;
-  const rate = prev.rate ? prev.rate * 0.65 + instant * 0.35 : instant;
+  if (elapsed * 1000 < RATE_WINDOW_MS) return prev.rate;
+  const instant = (bytes - prev.bytes) / elapsed;
+  const rate = prev.rate > 0 ? prev.rate * 0.7 + instant * 0.3 : instant;
   speedSamples.set(transfer.id, { bytes, at: now, rate });
   return rate;
 }
@@ -175,7 +187,7 @@ async function refresh() {
     ]);
     state.info = status;
     state.peers = peers;
-    state.transfers = transfers;
+    state.transfers = mergeTransfers(state.transfers, transfers);
     state.trust = trust;
     state.config = config;
     state.approvals = approvals;
@@ -196,9 +208,43 @@ function upsertPeer(peer) {
   state.peers.sort((a, b) => a.name.localeCompare(b.name));
 }
 
+const TERMINAL_STATUS = new Set(["done", "failed", "cancelled", "declined"]);
+
+/* Keep the furthest progress and terminal status from a late HTTP snapshot. */
+function mergeTransferView(current, incoming) {
+  if (!current) return incoming;
+  const files = (incoming.files || []).map((file, index) => {
+    const old = current.files?.[index];
+    if (!old) return file;
+    return {
+      ...file,
+      done: Math.max(old.done || 0, file.done || 0),
+      ok: file.ok === true || file.ok === false ? file.ok : old.ok,
+    };
+  });
+  const total =
+    current.transferred > 0 && current.total_bytes > 0
+      ? current.total_bytes
+      : incoming.total_bytes || current.total_bytes || 0;
+  return {
+    ...incoming,
+    status: TERMINAL_STATUS.has(current.status) ? current.status : incoming.status,
+    transferred: Math.max(current.transferred || 0, incoming.transferred || 0),
+    total_bytes: total,
+    files,
+    error: incoming.error || current.error,
+    finished_at: incoming.finished_at || current.finished_at,
+  };
+}
+
+function mergeTransfers(current, incoming) {
+  const local = new Map(current.map((transfer) => [transfer.id, transfer]));
+  return incoming.map((transfer) => mergeTransferView(local.get(transfer.id), transfer));
+}
+
 function upsertTransfer(transfer) {
   const index = state.transfers.findIndex((t) => t.id === transfer.id);
-  if (index >= 0) state.transfers[index] = transfer;
+  if (index >= 0) state.transfers[index] = mergeTransferView(state.transfers[index], transfer);
   else state.transfers.unshift(transfer);
   state.transfers.sort((a, b) => (b.started_at || 0) - (a.started_at || 0));
   if (state.transfers.length > 50) state.transfers.length = 50;
@@ -215,7 +261,7 @@ function renderAll() {
   applyTrust();
   renderPeers();
   renderTrust();
-  renderTransfers();
+  renderTransfers(true);
   renderApproval();
 }
 
@@ -327,33 +373,250 @@ function renderTrust() {
   });
 }
 
-function fileRows(files) {
-  const query = state.fileQuery.trim().toLowerCase();
-  const shown = files
-    .map((file, index) => ({ file, index }))
-    .filter(({ file }) => !query || file.name.toLowerCase().includes(query));
-  if (files.length === 0) return "";
-  const rows = shown
-    .slice(0, 500)
-    .map(({ file, index }) => {
-      const pct = file.size > 0 ? Math.min(100, Math.round(((file.done || 0) / file.size) * 100)) : 0;
-      const mark = file.ok === true ? "✓" : file.ok === false ? "✕" : "";
-      return `<li class="file-row" title="${esc(file.name)}">
-        <span class="file-name">${esc(file.name)}</span>
-        <span class="file-bytes">${fmtBytes(file.done || 0)} / ${fmtBytes(file.size)}</span>
-        <span class="file-pct">${mark || pct + "%"}</span>
-        <span class="file-bar"><span style="width:${pct}%"></span></span>
-      </li>`;
-    })
-    .join("");
-  const more =
-    shown.length > 500 ? `<li class="file-more">+${shown.length - 500} more</li>` : "";
-  const empty = shown.length === 0 ? `<li class="file-more">No file matches.</li>` : "";
-  return `<ul class="file-rows">${empty}${rows}${more}</ul>`;
+const FILE_ROWS_INITIAL = 100;
+const FILE_ROWS_MAX = 500;
+const expandedFiles = new Set();
+const transferRows = new Map();
+const dirtyTransfers = new Set();
+const dirtyFiles = new Map();
+let allTransfersDirty = false;
+let transfersRenderQueued = false;
+
+function transferStatus(transfer) {
+  if (
+    transfer.status === "active" &&
+    transfer.total_bytes > 0 &&
+    (transfer.transferred || 0) >= transfer.total_bytes
+  ) {
+    return transfer.direction === "in" ? "verifying" : "waiting";
+  }
+  return transfer.status;
 }
 
-function renderTransfers() {
+function filesKey(transfer) {
+  return `${(transfer.files || []).length}|${state.fileQuery}|${expandedFiles.has(transfer.id) ? "all" : "part"}`;
+}
+
+function scheduleTransfers() {
+  if (transfersRenderQueued) return;
+  transfersRenderQueued = true;
+  const run = () => {
+    transfersRenderQueued = false;
+    renderTransfers();
+  };
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(run);
+  else setTimeout(run, 32);
+}
+
+function markTransferDirty(id, allFiles = false) {
+  if (id) {
+    dirtyTransfers.add(id);
+    if (allFiles) {
+      const transfer = state.transfers.find((item) => item.id === id);
+      if (transfer) {
+        let indices = dirtyFiles.get(id);
+        if (!indices) {
+          indices = new Set();
+          dirtyFiles.set(id, indices);
+        }
+        (transfer.files || []).forEach((_, index) => indices.add(index));
+      }
+    }
+  } else {
+    allTransfersDirty = true;
+  }
+  scheduleTransfers();
+}
+
+function markFileDirty(id, index) {
+  let indices = dirtyFiles.get(id);
+  if (!indices) {
+    indices = new Set();
+    dirtyFiles.set(id, indices);
+  }
+  indices.add(index);
+  dirtyTransfers.add(id);
+  scheduleTransfers();
+}
+
+function invalidateTransfers() {
+  allTransfersDirty = true;
+  scheduleTransfers();
+}
+
+function createTransferView(transfer) {
+  const el = document.createElement("li");
+  el.className = "transfer";
+  el.dataset.transfer = transfer.id;
+  el.innerHTML = `
+    <div class="dir in"></div>
+    <div class="t-main">
+      <div class="transfer-top">
+        <div class="transfer-title"></div>
+        <button class="icon-btn" type="button" title="Cancel">${icon("stop")}</button>
+      </div>
+      <div class="transfer-sub"></div>
+      <div class="bar"><span></span></div>
+      <ul class="file-rows"></ul>
+    </div>
+    <div class="t-side">
+      <span class="status"></span>
+      <span class="t-pct"></span>
+    </div>`;
+  const view = {
+    el,
+    dir: el.querySelector(".dir"),
+    title: el.querySelector(".transfer-title"),
+    cancel: el.querySelector("[title='Cancel']"),
+    sub: el.querySelector(".transfer-sub"),
+    bar: el.querySelector(".bar > span"),
+    files: el.querySelector(".file-rows"),
+    status: el.querySelector(".status"),
+    pct: el.querySelector(".t-pct"),
+    fileNodes: new Map(),
+    filesKey: "",
+  };
+  view.cancel.addEventListener("click", () => cancelTransfer(transfer.id));
+  return view;
+}
+
+function updateTransferView(view, transfer) {
+  const files = transfer.files || [];
+  const total = transfer.total_bytes || 0;
+  const done = transfer.transferred || 0;
+  const pct = total > 0 ? Math.min(100, Math.floor((done / total) * 100)) : 0;
+  const status = transferStatus(transfer);
+  const summary =
+    files.length === 0
+      ? "no files"
+      : files.length === 1
+        ? files[0].name
+        : `${files[0].name} +${files.length - 1}`;
+  const rate = rateFor(transfer);
+  const eta = rate > 0 ? fmtEta((total - done) / rate) : "";
+  const bits = [
+    esc(transfer.peer_name),
+    `${fmtBytes(done)} / ${fmtBytes(total)}`,
+    rate > 0 ? fmtRate(rate) : "",
+    eta,
+    timeAgo(transfer.finished_at || transfer.started_at),
+  ].filter(Boolean);
+  if (transfer.error) bits.push(esc(transfer.error));
+
+  view.el.className = `transfer ${transfer.status}`;
+  view.dir.className = `dir ${transfer.direction}`;
+  view.dir.innerHTML = icon(transfer.direction === "in" ? "download" : "upload");
+  view.title.textContent = summary;
+  view.title.title = summary;
+  view.sub.innerHTML = bits.join(" · ");
+  view.bar.style.width = `${pct}%`;
+  view.status.className = `status ${status}`;
+  view.status.textContent = status;
+  view.pct.textContent =
+    transfer.status === "active"
+      ? status === "verifying"
+        ? "verify"
+        : status === "waiting"
+          ? "wait"
+          : `${pct}%`
+      : "";
+  view.cancel.hidden = transfer.status !== "active";
+}
+
+function updateFileRow(view, file) {
+  const done = file.done || 0;
+  const pct = file.size > 0 ? Math.min(100, Math.floor((done / file.size) * 100)) : 0;
+  const mark = file.ok === true ? "✓" : file.ok === false ? "✕" : "";
+  const pending = !mark && file.size > 0 && done >= file.size;
+  view.name.textContent = file.name;
+  view.name.title = file.name;
+  view.bytes.textContent = `${fmtBytes(done)} / ${fmtBytes(file.size)}`;
+  view.pct.textContent = mark || (pending ? "verify" : `${pct}%`);
+  view.pct.classList.toggle("pending", Boolean(pending));
+  view.pct.classList.toggle("failed", file.ok === false);
+  view.bar.style.width = `${pct}%`;
+}
+
+function createFileRow(index, file) {
+  const el = document.createElement("li");
+  el.className = "file-row";
+  el.dataset.fileIndex = String(index);
+  el.innerHTML = `
+    <span class="file-name"></span>
+    <span class="file-bytes"></span>
+    <span class="file-pct"></span>
+    <span class="file-bar"><span></span></span>`;
+  const view = {
+    el,
+    name: el.querySelector(".file-name"),
+    bytes: el.querySelector(".file-bytes"),
+    pct: el.querySelector(".file-pct"),
+    bar: el.querySelector(".file-bar > span"),
+  };
+  updateFileRow(view, file);
+  return view;
+}
+
+function rebuildFileRows(view, transfer) {
+  const files = transfer.files || [];
+  const query = state.fileQuery.trim().toLowerCase();
+  const expanded = expandedFiles.has(transfer.id);
+  const limit = expanded ? FILE_ROWS_MAX : FILE_ROWS_INITIAL;
+  const matches = [];
+  files.forEach((file, index) => {
+    if (!query || file.name.toLowerCase().includes(query)) matches.push(index);
+  });
+
+  view.files.replaceChildren();
+  view.fileNodes = new Map();
+  view.files.hidden = files.length === 0;
+  if (files.length === 0) {
+    view.filesKey = filesKey(transfer);
+    return;
+  }
+
+  matches.slice(0, limit).forEach((index) => {
+    const row = createFileRow(index, files[index]);
+    view.fileNodes.set(index, row);
+    view.files.appendChild(row.el);
+  });
+
+  if (matches.length === 0) {
+    const empty = document.createElement("li");
+    empty.className = "file-more";
+    empty.textContent = "No file matches.";
+    view.files.appendChild(empty);
+  } else if (matches.length > limit) {
+    const more = document.createElement("li");
+    more.className = "file-more";
+    const remaining = matches.length - limit;
+    if (!expanded) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "link-btn";
+      button.textContent = `Show ${remaining} more`;
+      button.addEventListener("click", () => {
+        expandedFiles.add(transfer.id);
+        markTransferDirty(transfer.id);
+      });
+      more.appendChild(button);
+    } else {
+      more.textContent = `+${remaining} more`;
+    }
+    view.files.appendChild(more);
+  }
+  view.filesKey = filesKey(transfer);
+}
+
+function renderTransfers(force = false) {
   const list = $("transfer-list");
+  const forceAll = force || allTransfersDirty;
+  const dirty = new Set(dirtyTransfers);
+  const dirtyFileIndices = new Map(dirtyFiles);
+  allTransfersDirty = false;
+  dirtyTransfers.clear();
+  dirtyFiles.clear();
+
   const active = state.transfers.filter((t) => t.status === "active").length;
   $("transfer-count").textContent =
     state.transfers.length === 0
@@ -364,58 +627,47 @@ function renderTransfers() {
 
   if (state.transfers.length === 0) {
     list.innerHTML = `<li class="empty">Nothing yet.</li>`;
+    transferRows.clear();
     return;
   }
-  list.innerHTML = state.transfers
-    .map((transfer) => {
-      const total = transfer.total_bytes || 0;
-      const done = transfer.transferred || 0;
-      const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
-      const files = transfer.files || [];
-      const summary =
-        files.length === 0
-          ? "no files"
-          : files.length === 1
-            ? files[0].name
-            : `${files[0].name} +${files.length - 1}`;
 
-      const rate = rateFor(transfer);
-      const eta = rate > 0 ? fmtEta((total - done) / rate) : "";
-      const bits = [
-        esc(transfer.peer_name),
-        `${fmtBytes(done)} / ${fmtBytes(total)}`,
-        rate > 0 ? fmtRate(rate) : "",
-        eta,
-        timeAgo(transfer.finished_at || transfer.started_at),
-      ].filter(Boolean);
-      if (transfer.error) bits.push(esc(transfer.error));
+  let cursor = list.firstElementChild;
+  state.transfers.forEach((transfer) => {
+    let view = transferRows.get(transfer.id);
+    if (!view) {
+      view = createTransferView(transfer);
+      transferRows.set(transfer.id, view);
+      updateTransferView(view, transfer);
+      rebuildFileRows(view, transfer);
+    } else {
+      if (forceAll || dirty.has(transfer.id)) updateTransferView(view, transfer);
+      if (view.filesKey !== filesKey(transfer)) {
+        rebuildFileRows(view, transfer);
+      } else {
+        const indices = dirtyFileIndices.get(transfer.id);
+        if (indices) {
+          indices.forEach((index) => {
+            const row = view.fileNodes.get(index);
+            const file = transfer.files?.[index];
+            if (row && file) updateFileRow(row, file);
+          });
+        }
+      }
+    }
 
-      const cancel =
-        transfer.status === "active"
-          ? `<button class="icon-btn" data-cancel="${esc(transfer.id)}" title="Cancel">${icon("stop")}</button>`
-          : "";
-      return `
-        <li class="transfer ${esc(transfer.status)}" data-transfer="${esc(transfer.id)}">
-          <div class="dir ${esc(transfer.direction)}">${icon(transfer.direction === "in" ? "download" : "upload")}</div>
-          <div class="t-main">
-            <div class="transfer-top">
-              <div class="transfer-title" title="${esc(summary)}">${esc(summary)}</div>
-              ${cancel}
-            </div>
-            <div class="transfer-sub">${bits.join(" · ")}</div>
-            <div class="bar"><span style="width:${pct}%"></span></div>
-            ${fileRows(files)}
-          </div>
-          <div class="t-side">
-            <span class="status ${esc(transfer.status)}">${esc(transfer.status)}</span>
-            <span class="t-pct">${transfer.status === "active" ? pct + "%" : ""}</span>
-          </div>
-        </li>`;
-    })
-    .join("");
-  list.querySelectorAll("[data-cancel]").forEach((button) => {
-    button.addEventListener("click", () => cancelTransfer(button.dataset.cancel));
+    if (view.el === cursor) {
+      cursor = cursor.nextElementSibling;
+    } else {
+      list.insertBefore(view.el, cursor);
+    }
   });
+
+  while (cursor) {
+    const next = cursor.nextElementSibling;
+    if (cursor.dataset.transfer) transferRows.delete(cursor.dataset.transfer);
+    cursor.remove();
+    cursor = next;
+  }
 }
 
 async function cancelTransfer(id) {
@@ -589,7 +841,8 @@ $("settings-clear").addEventListener("click", async () => {
   try {
     await api("POST", "/api/transfers/clear");
     state.transfers = [];
-    renderTransfers();
+    speedSamples.clear();
+    renderTransfers(true);
     $("settings-hint").textContent = "History cleared.";
   } catch (error) {
     $("settings-hint").textContent = String(error);
@@ -606,7 +859,7 @@ $("about-copy").addEventListener("click", async () => {
 $("btn-send").addEventListener("click", sendToSelected);
 $("transfer-search").addEventListener("input", (event) => {
   state.fileQuery = event.target.value;
-  renderTransfers();
+  invalidateTransfers();
 });
 $("btn-send-folder").addEventListener("click", sendFolderToSelected);
 $("btn-settings").addEventListener("click", openSettings);
@@ -649,7 +902,7 @@ async function handleEvent(payload) {
     case "session": {
       const before = state.transfers.find((t) => t.id === payload.transfer.id);
       upsertTransfer(payload.transfer);
-      renderTransfers();
+      markTransferDirty(payload.transfer.id, true);
       const t = payload.transfer;
       if (prefs.openAfter && t.direction === "in" && t.status === "done" && before?.status !== "done") {
         invoke("open_path", { path: state.config.out_dir }).catch(() => {});
@@ -660,16 +913,16 @@ async function handleEvent(payload) {
       const transfer = state.transfers.find((t) => t.id === payload.id);
       if (transfer && transfer.files[payload.index]) {
         transfer.files[payload.index] = payload.file;
-        renderTransfers();
+        markFileDirty(payload.id, payload.index);
       }
       break;
     }
     case "progress": {
       const transfer = state.transfers.find((t) => t.id === payload.id);
       if (transfer) {
-        transfer.transferred = payload.transferred;
-        transfer.total_bytes = payload.total;
-        renderTransfers();
+        transfer.transferred = Math.max(transfer.transferred || 0, payload.transferred);
+        if (payload.total > 0) transfer.total_bytes = payload.total;
+        markTransferDirty(payload.id);
       }
       break;
     }

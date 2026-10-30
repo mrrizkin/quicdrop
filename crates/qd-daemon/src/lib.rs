@@ -325,10 +325,11 @@ impl Inner {
         let mut found = false;
         if let Ok(mut transfers) = self.transfers.lock() {
             if let Some(t) = transfers.iter_mut().find(|t| t.id == id) {
-                t.transferred = transferred;
-                if total > t.total_bytes {
+                // Resume can lower the accepted total; it is authoritative once sending starts.
+                if total > 0 {
                     t.total_bytes = total;
                 }
+                t.transferred = transferred.max(t.transferred);
                 found = true;
             }
         }
@@ -399,6 +400,20 @@ impl Inner {
             file: file.clone(),
         });
         Some(file)
+    }
+
+    /// Mark every file complete after a successful transfer.
+    fn complete_files(&self, transfer_id: &str) {
+        if let Ok(mut transfers) = self.transfers.lock() {
+            if let Some(transfer) = transfers.iter_mut().find(|t| t.id == transfer_id) {
+                for file in &mut transfer.files {
+                    file.done = file.size;
+                    if file.ok.is_none() {
+                        file.ok = Some(true);
+                    }
+                }
+            }
+        }
     }
 
     fn resolve_approval(&self, id: &str, decision: Decision) -> bool {
@@ -723,6 +738,9 @@ fn server_event_sink(inner: Arc<Inner>) -> ServerEventSink {
                     TransferStatus::Done
                 };
                 inner.progress(&id, bytes, bytes);
+                if failures == 0 {
+                    inner.complete_files(&id);
+                }
                 inner.finish_transfer(
                     &id,
                     status,
@@ -941,6 +959,9 @@ pub fn spawn_send(
                     TransferStatus::Done
                 };
                 state.progress(&transfer_id, summary.bytes, summary.bytes);
+                if summary.failed == 0 {
+                    state.complete_files(&transfer_id);
+                }
                 state.finish_transfer(
                     &transfer_id,
                     status,

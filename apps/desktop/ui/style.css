@@ -134,13 +134,17 @@ select {
 .app {
   display: grid;
   grid-template-columns: 218px 1fr;
+  grid-template-rows: minmax(0, 1fr);
   height: 100vh;
+  height: 100dvh;
+  min-height: 0;
 }
 
 .sidebar {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  overflow: hidden;
   padding: 6px 6px 6px;
   background: var(--side);
   border-right: 1px solid var(--sep);
@@ -534,6 +538,7 @@ select {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .empty {
@@ -664,6 +669,11 @@ select {
   color: var(--warn);
 }
 
+.status.verifying,
+.status.waiting {
+  color: var(--warn);
+}
+
 .t-pct {
   font-size: 10.5px;
   color: var(--text-3);
@@ -676,6 +686,7 @@ select {
   padding: 0;
   max-height: 132px;
   overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .file-row {
@@ -712,6 +723,27 @@ select {
   text-align: right;
   font-variant-numeric: tabular-nums;
   color: var(--ok);
+}
+
+.file-pct.pending {
+  color: var(--warn);
+}
+
+.file-pct.failed {
+  color: var(--err);
+}
+
+.link-btn {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+
+.link-btn:hover {
+  text-decoration: underline;
 }
 
 .file-bar {
@@ -1033,14 +1065,21 @@ select.input {
 .modal.settings {
   width: 640px;
   max-width: calc(100vw - 48px);
+  max-height: calc(100vh - 48px);
+  max-height: calc(100dvh - 48px);
+  display: flex;
+  flex-direction: column;
 }
 
 .settings-body {
   display: grid;
   grid-template-columns: 148px minmax(0, 1fr);
   min-height: 288px;
-  border-top: 1px solid var(--line);
-  border-bottom: 1px solid var(--line);
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  border-top: 1px solid var(--sep);
+  border-bottom: 1px solid var(--sep);
 }
 
 .settings-nav {
@@ -1048,8 +1087,8 @@ select.input {
   flex-direction: column;
   gap: 2px;
   padding: 8px;
-  border-right: 1px solid var(--line);
-  background: var(--surface-2, transparent);
+  border-right: 1px solid var(--sep);
+  background: var(--side);
 }
 
 .settings-nav button {
@@ -1060,7 +1099,7 @@ select.input {
   padding: 0 8px;
   font: inherit;
   font-size: 12px;
-  color: var(--muted);
+  color: var(--text-2);
   text-align: left;
   background: none;
   border: 0;
@@ -1070,12 +1109,12 @@ select.input {
 
 .settings-nav button:hover {
   color: var(--text);
-  background: var(--hover, rgba(127, 127, 127, 0.08));
+  background: color-mix(in srgb, var(--text) 8%, transparent);
 }
 
 .settings-nav button.active {
   color: var(--text);
-  background: var(--hover, rgba(127, 127, 127, 0.12));
+  background: color-mix(in srgb, var(--text) 12%, transparent);
   font-weight: 600;
 }
 
@@ -1106,7 +1145,7 @@ select.input {
 }
 
 .kv span {
-  color: var(--muted);
+  color: var(--text-2);
 }
 
 .kv code {
