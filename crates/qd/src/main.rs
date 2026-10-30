@@ -66,7 +66,7 @@ enum Command {
         to: String,
 
         /// Parallel file streams
-        #[arg(short = 'j', long, default_value_t = 4)]
+        #[arg(short = 'j', long, default_value_t = 8)]
         concurrency: usize,
 
         /// How long to wait for the peer to show up in discovery

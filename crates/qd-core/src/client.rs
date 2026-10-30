@@ -84,7 +84,16 @@ pub async fn send(opts: SendOpts) -> Result<Summary> {
     let connecting = endpoint
         .connect(opts.addr, "quicdrop.local")
         .with_context(|| format!("connect to {}", opts.addr))?;
-    let conn = connecting.await.context("QUIC handshake")?;
+    let conn = match connecting.await {
+        Ok(conn) => conn,
+        Err(quinn::ConnectionError::TimedOut) => bail!(
+            "{} did not answer. The receiver may be stopped, or a firewall is blocking UDP {}. \
+             Check that both sides use the same port and that inbound UDP is allowed.",
+            opts.addr,
+            opts.addr.port()
+        ),
+        Err(e) => bail!("handshake with {} failed: {e}", opts.addr),
+    };
     debug!("connected to {} in one RTT", conn.remote_address());
 
     let session = new_session_id();

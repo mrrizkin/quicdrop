@@ -1,3 +1,4 @@
+use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Human readable byte size, e.g. `1.4 MiB`.
@@ -131,14 +132,14 @@ pub fn unique_path(dir: &Path, name: &str) -> PathBuf {
     dir.join(format!("{stem}-{name}"))
 }
 
-/// Best effort hostname for display purposes.
+/// Hostname as a source of session-id entropy, not for display.
 pub fn hostname() -> String {
     if let Ok(h) = std::env::var("QD_NAME") {
         if !h.trim().is_empty() {
             return h;
         }
     }
-    if let Ok(h) = std::fs::read_to_string("/etc/hostname") {
+    if let Ok(h) = fs::read_to_string("/etc/hostname") {
         let h = h.trim();
         if !h.is_empty() {
             return h.to_string();

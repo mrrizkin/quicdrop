@@ -421,9 +421,9 @@ async function sendFolderToSelected() {
     return;
   }
   try {
-    const dir = await invoke("pick_folder");
-    if (!dir) return;
-    await sendPaths(peer, [dir], `Sending folder to ${peer.name}…`);
+    const dirs = await invoke("pick_folders");
+    if (!dirs || dirs.length === 0) return;
+    await sendPaths(peer, dirs, `Sending ${dirs.length} folder(s) to ${peer.name}…`);
   } catch (error) {
     toast(`Could not open the folder picker: ${error}`);
   }
@@ -434,7 +434,7 @@ async function sendPaths(peer, paths, message) {
     await api("POST", "/api/send", {
       to: peer.addr,
       paths,
-      concurrency: 4,
+      concurrency: 8,
     });
     toast(message || `Sending to ${peer.name}…`);
   } catch (error) {

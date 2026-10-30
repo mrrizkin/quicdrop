@@ -276,7 +276,7 @@ async fn send(
         inner,
         body.to,
         body.paths,
-        body.concurrency.unwrap_or(4),
+        body.concurrency.unwrap_or(8),
         Duration::from_secs(body.timeout_secs.unwrap_or(5).max(1)),
     );
     Ok(Json(json!({ "id": id })))

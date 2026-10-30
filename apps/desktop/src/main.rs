@@ -105,6 +105,21 @@ async fn pick_files(app: tauri::AppHandle) -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
+async fn pick_folders(app: tauri::AppHandle) -> Result<Vec<String>, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog().file().pick_folders(move |paths| {
+        let _ = tx.send(paths);
+    });
+    let paths = rx.await.map_err(|e| e.to_string())?;
+    Ok(paths
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|p| p.into_path().ok())
+        .map(|p| p.display().to_string())
+        .collect())
+}
+
+#[tauri::command]
 async fn pick_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.dialog().file().pick_folder(move |path| {
@@ -174,7 +189,8 @@ fn main() {
             api,
             daemon_info,
             pick_files,
-            pick_folder
+            pick_folder,
+            pick_folders
         ])
         .build(tauri::generate_context!())
         .expect("build tauri app")

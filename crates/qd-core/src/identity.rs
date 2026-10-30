@@ -3,8 +3,6 @@ use rcgen::{date_time_ymd, CertificateParams, DnType, KeyPair};
 use std::fs;
 use std::path::PathBuf;
 
-use crate::util::hostname;
-
 /// Long-lived identity. The device id is the certificate fingerprint, so peers can pin it.
 #[derive(Debug, Clone)]
 pub struct Identity {
@@ -46,7 +44,7 @@ impl Identity {
                     .map(|s| s.trim().to_string())
             })
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(hostname);
+            .unwrap_or_else(random_name);
 
         let key = match fs::read_to_string(&key_path) {
             Ok(pem) => KeyPair::from_pem(&pem).context("load identity key")?,
@@ -128,6 +126,34 @@ fn build_cert(name: &str, key: &KeyPair) -> Result<(CertificateParams, Vec<u8>)>
     params.not_after = date_time_ymd(9999, 12, 31);
     let cert = params.self_signed(key).context("self-sign certificate")?;
     Ok((params, cert.der().to_vec()))
+}
+
+/// LocalSend-style default: "Brave Otter". Not a secret, only a label.
+fn random_name() -> String {
+    const ADJECTIVES: [&str; 24] = [
+        "Brave", "Calm", "Clever", "Cosmic", "Dusty", "Eager", "Fuzzy", "Gentle", "Golden",
+        "Hidden", "Jolly", "Lucky", "Mellow", "Nimble", "Quiet", "Rapid", "Shiny", "Silent",
+        "Sleepy", "Solar", "Swift", "Tidy", "Witty", "Young",
+    ];
+    const NOUNS: [&str; 24] = [
+        "Badger", "Comet", "Dolphin", "Ember", "Falcon", "Fern", "Gecko", "Heron", "Ibis", "Koala",
+        "Lantern", "Lynx", "Meadow", "Otter", "Owl", "Panda", "Pebble", "Raven", "River",
+        "Sparrow", "Tiger", "Willow", "Wolf", "Wren",
+    ];
+    let mut seed = [0u8; 16];
+    seed[..8].copy_from_slice(&(std::process::id() as u64).to_le_bytes());
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    seed[8..].copy_from_slice(&(nanos as u64).to_le_bytes());
+    let hash = blake3::hash(&seed);
+    let bytes = hash.as_bytes();
+    format!(
+        "{} {}",
+        ADJECTIVES[bytes[0] as usize % ADJECTIVES.len()],
+        NOUNS[bytes[1] as usize % NOUNS.len()]
+    )
 }
 
 #[cfg(unix)]
