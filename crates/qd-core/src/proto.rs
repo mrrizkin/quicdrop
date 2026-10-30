@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 /// ALPN identifier; bumped when the wire format changes incompatibly.
 pub const ALPN: &[u8] = b"quicdrop/1";
-pub const PROTO_VERSION: u16 = 2;
+pub const PROTO_VERSION: u16 = 3;
 
 pub const DEFAULT_QUIC_PORT: u16 = 53320;
 pub const DEFAULT_DISCOVERY_PORT: u16 = 53321;
@@ -68,34 +68,33 @@ pub enum Frame {
     Bye,
 }
 
-/// Files larger than this are spread over several streams.
-pub const SPLIT_MIN_BYTES: u64 = 16 * 1024 * 1024;
+/// Bytes carried by one stream chunk.
+pub const CHUNK_STREAM_BYTES: u64 = 8 * 1024 * 1024;
 
-/// Upper bound on streams per file. The transport allows far more; this keeps one
-/// large transfer from starving the other files.
-pub const MAX_SEGMENTS: u16 = 4;
+/// Streams one file may use at once. The transport allows far more; this keeps a
+/// single large file from starving the others.
+pub const MAX_STREAMS_PER_FILE: u16 = 4;
 
-/// Number of streams a remaining byte range should use.
-pub fn segment_count(remaining: u64) -> u16 {
-    if remaining <= SPLIT_MIN_BYTES {
-        return 1;
-    }
-    remaining.div_ceil(SPLIT_MIN_BYTES).min(MAX_SEGMENTS as u64) as u16
+/// Number of chunks the remaining range is cut into.
+pub fn chunk_count(offset: u64, size: u64) -> u16 {
+    let remaining = size.saturating_sub(offset);
+    remaining
+        .div_ceil(CHUNK_STREAM_BYTES)
+        .max(1)
+        .min(u16::MAX as u64) as u16
 }
 
-/// Byte range carried by `index` when a file is split into `count` streams.
-///
-/// Both sides derive ranges from this function, so the receiver can reject a
-/// header whose offset or length does not match its own calculation.
-pub fn segment_range(offset: u64, size: u64, count: u16, index: u16) -> (u64, u64) {
-    let remaining = size.saturating_sub(offset);
-    let count = count.max(1) as u64;
-    let index = index as u64;
-    let base = remaining / count;
-    let extra = remaining % count;
-    let start = offset + base * index + extra.min(index);
-    let len = base + u64::from(index < extra);
+/// Byte range of chunk `index`. Both sides derive it, so the receiver can reject a
+/// header that does not match the accepted plan.
+pub fn chunk_range(offset: u64, size: u64, index: u16) -> (u64, u64) {
+    let start = offset.saturating_add(u64::from(index) * CHUNK_STREAM_BYTES);
+    let len = size.saturating_sub(start).min(CHUNK_STREAM_BYTES);
     (start, len)
+}
+
+/// Workers to run for a file with `count` chunks.
+pub fn stream_count(count: u16) -> u16 {
+    count.min(MAX_STREAMS_PER_FILE)
 }
 
 /// Header written at the beginning of every file stream.
@@ -103,21 +102,20 @@ pub fn segment_range(offset: u64, size: u64, count: u16, index: u16) -> (u64, u6
 pub struct FileHeader {
     pub session: [u8; 16],
     pub id: u32,
-    /// Start of this segment; equals the resume offset for `index == 0`.
+    /// Start of this chunk.
     pub offset: u64,
-    /// Whole file size, not the segment length.
+    /// Whole file size, not the chunk length.
     pub size: u64,
     pub index: u16,
     pub count: u16,
 }
 
-/// Written after the payload of a file stream. `hash` covers the whole file, so
-/// every segment carries the same value.
+/// Written after the payload of a stream. `hash` covers the whole file, so every
+/// chunk carries the same value; the receiver verifies once at the end.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct FileTrailer {
     pub id: u32,
     pub hash: String,
-    pub index: u16,
 }
 
 /// Verdict sent back on the same stream once the receiver finished writing.

@@ -3,6 +3,7 @@
 use anyhow::{bail, Context, Result};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -279,24 +280,23 @@ async fn send_one(
     file_progress: Option<FileSink>,
 ) -> Result<u64> {
     let started = Instant::now();
-    // Hash first so every segment can carry the same whole-file digest, then send the
-    // remaining range over up to MAX_SEGMENTS parallel streams.
+    // Hash once so every chunk carries the same whole-file digest, then let a pool of
+    // workers pull 8 MiB chunks until the remaining range is on the wire.
     let hash = hash_file(path).await?;
-    let remaining = meta.size.saturating_sub(offset);
-    let count = proto::segment_count(remaining);
+    let count = proto::chunk_count(offset, meta.size);
+    let workers = proto::stream_count(count) as usize;
+    let next = Arc::new(AtomicUsize::new(0));
 
-    let mut tasks = Vec::with_capacity(count as usize);
-    for index in 0..count {
-        let (start, len) = proto::segment_range(offset, meta.size, count, index);
-        tasks.push(tokio::spawn(send_segment(
+    let mut tasks = Vec::with_capacity(workers);
+    for _ in 0..workers {
+        tasks.push(tokio::spawn(send_worker(
             conn.clone(),
             session,
             path.to_path_buf(),
             meta.clone(),
-            start,
-            len,
-            index,
+            offset,
             count,
+            next.clone(),
             hash.clone(),
             progress.clone(),
             file_progress.clone(),
@@ -309,7 +309,7 @@ async fn send_one(
         match task.await {
             Ok(Ok(bytes)) => sent += bytes,
             Ok(Err(e)) => failure = failure.or_else(|| Some(format!("{e:#}"))),
-            Err(e) => failure = failure.or_else(|| Some(format!("segment task: {e}"))),
+            Err(e) => failure = failure.or_else(|| Some(format!("chunk worker: {e}"))),
         }
     }
     if let Some(message) = failure {
@@ -317,6 +317,44 @@ async fn send_one(
     }
     debug!("{} sent in {:?}", meta.name, started.elapsed());
     Ok(sent)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_worker(
+    conn: quinn::Connection,
+    session: [u8; 16],
+    path: PathBuf,
+    meta: FileMeta,
+    offset: u64,
+    count: u16,
+    next: Arc<AtomicUsize>,
+    hash: String,
+    progress: Arc<Progress>,
+    file_progress: Option<FileSink>,
+) -> Result<u64> {
+    let mut sent = 0u64;
+    loop {
+        let index = next.fetch_add(1, Ordering::Relaxed);
+        if index >= count as usize {
+            return Ok(sent);
+        }
+        let index = index as u16;
+        let (start, len) = proto::chunk_range(offset, meta.size, index);
+        sent += send_chunk(
+            &conn,
+            session,
+            &path,
+            &meta,
+            start,
+            len,
+            index,
+            count,
+            &hash,
+            &progress,
+            &file_progress,
+        )
+        .await?;
+    }
 }
 
 async fn hash_file(path: &Path) -> Result<String> {
@@ -336,18 +374,18 @@ async fn hash_file(path: &Path) -> Result<String> {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn send_segment(
-    conn: quinn::Connection,
+async fn send_chunk(
+    conn: &quinn::Connection,
     session: [u8; 16],
-    path: PathBuf,
-    meta: FileMeta,
+    path: &Path,
+    meta: &FileMeta,
     start: u64,
     len: u64,
     index: u16,
     count: u16,
-    hash: String,
-    progress: Arc<Progress>,
-    file_progress: Option<FileSink>,
+    hash: &str,
+    progress: &Progress,
+    file_progress: &Option<FileSink>,
 ) -> Result<u64> {
     let (mut send, mut recv) = conn.open_bi().await.context("open file stream")?;
     proto::write_msg(
@@ -363,14 +401,14 @@ async fn send_segment(
     )
     .await?;
 
-    let mut file = tokio::fs::File::open(&path)
+    let mut file = tokio::fs::File::open(path)
         .await
         .with_context(|| format!("open {}", path.display()))?;
     file.seek(std::io::SeekFrom::Start(start)).await?;
 
     let mut remaining = len;
     let mut buf = vec![0u8; proto::CHUNK_SIZE];
-    let mut sent = 0u64;
+    let mut written = 0u64;
     while remaining > 0 {
         let want = remaining.min(buf.len() as u64) as usize;
         let n = file
@@ -384,18 +422,17 @@ async fn send_segment(
             .await
             .context("write file chunk")?;
         remaining -= n as u64;
-        sent += n as u64;
+        written += n as u64;
         progress.add(n as u64);
-        if let Some(sink) = &file_progress {
-            sink(meta.id, start + sent, meta.size);
+        if let Some(sink) = file_progress {
+            sink(meta.id, start + written, meta.size);
         }
     }
     proto::write_msg(
         &mut send,
         &FileTrailer {
             id: meta.id,
-            hash: hash.clone(),
-            index,
+            hash: hash.to_string(),
         },
     )
     .await?;
@@ -405,10 +442,11 @@ async fn send_segment(
     if !ack.ok {
         bail!("receiver rejected file: {}", ack.message);
     }
-    if ack.hash != hash {
+    // Empty hash means "chunk written"; the last chunk carries the file verdict.
+    if !ack.hash.is_empty() && ack.hash != hash {
         bail!("peer computed a different digest");
     }
-    Ok(sent)
+    Ok(written)
 }
 
 fn new_session_id() -> [u8; 16] {

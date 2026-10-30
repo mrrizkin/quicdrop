@@ -323,7 +323,7 @@ struct PlannedFile {
 type SegmentOutcome = (u32, String, u64, bool, bool);
 
 /// Segments of one file share this: how many are still writing, how many bytes have
-/// arrived, and the single verdict every segment must report.
+/// arrived, and the single verdict every chunk must report.
 struct Flight {
     remaining: AtomicU16,
     written: AtomicU64,
@@ -350,7 +350,7 @@ impl Flight {
     }
 }
 
-/// Account for a segment that will never complete, so the others stop waiting.
+/// Account for a chunk that will never complete, so the others stop waiting.
 fn fail_flight(planned: &PlannedFile, message: String) {
     if planned.flight.remaining.fetch_sub(1, Ordering::SeqCst) == 1 {
         let _ = planned.flight.verdict.send(Some(Verdict {
@@ -499,7 +499,7 @@ async fn handle_connection(
             id: meta.id,
             offset,
         });
-        let count = proto::segment_count(meta.size.saturating_sub(offset));
+        let count = proto::chunk_count(offset, meta.size);
         plan.push(PlannedFile {
             meta,
             dest,
@@ -797,18 +797,18 @@ async fn write_segment(
 ) -> Result<SegmentOutcome> {
     let expected = planned.meta.size;
     let offset = planned.offset.min(expected);
-    let count = proto::segment_count(expected.saturating_sub(offset));
+    let count = proto::chunk_count(offset, expected);
     if header.size != expected || header.count != count || header.index >= count {
         bail!(
-            "segment {}/{} does not match the accepted plan ({count} expected)",
+            "chunk {}/{} does not match the accepted plan ({count} expected)",
             header.index,
             header.count
         );
     }
-    let (start, len) = proto::segment_range(offset, expected, count, header.index);
+    let (start, len) = proto::chunk_range(offset, expected, header.index);
     if header.offset != start {
         bail!(
-            "segment {} starts at {} instead of {start}",
+            "chunk {} starts at {} instead of {start}",
             header.index,
             header.offset
         );
@@ -857,7 +857,7 @@ async fn write_segment(
     }
     file.flush().await?;
     if written != len {
-        bail!("{} segment incomplete: {written}/{len}", planned.label);
+        bail!("{} chunk incomplete: {written}/{len}", planned.label);
     }
     if count > 1 {
         remember_range(&planned.dest, start, len).await;
@@ -898,22 +898,20 @@ async fn write_segment(
         ));
     }
 
-    // The segment that completes the file publishes the verdict for all of them.
-    let mut rx = planned.flight.verdict.subscribe();
-    let verdict = loop {
-        if let Some(verdict) = rx.borrow_and_update().clone() {
-            break verdict;
-        }
-        if rx.changed().await.is_err() {
-            break Verdict {
-                ok: false,
-                hash: String::new(),
-                message: "file aborted".into(),
-            };
-        }
-    };
-    send_ack(send, planned.meta.id, &verdict).await;
-    Ok((planned.meta.id, planned.label.clone(), 0, verdict.ok, false))
+    // A written chunk is acknowledged right away; the whole-file verdict arrives on
+    // the ack of whichever chunk finishes last. Waiting here would stall the sender,
+    // because it only asks for the next chunk after this ack.
+    send_ack(
+        send,
+        planned.meta.id,
+        &Verdict {
+            ok: true,
+            hash: String::new(),
+            message: String::new(),
+        },
+    )
+    .await;
+    Ok((planned.meta.id, planned.label.clone(), 0, true, false))
 }
 
 fn sidecar_path(dest: &std::path::Path) -> PathBuf {
@@ -924,7 +922,7 @@ fn sidecar_path(dest: &std::path::Path) -> PathBuf {
 
 /// Contiguous prefix proven by the ranges recorded next to a split partial file.
 async fn trusted_prefix(dest: &std::path::Path, len: u64) -> u64 {
-    if len <= proto::SPLIT_MIN_BYTES {
+    if len <= proto::CHUNK_STREAM_BYTES {
         return len;
     }
     let Ok(text) = tokio::fs::read_to_string(sidecar_path(dest)).await else {
@@ -1048,9 +1046,9 @@ mod tests {
     fn split_partials_resume_from_the_proven_prefix() {
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("big.bin");
-        let len = proto::SPLIT_MIN_BYTES * 2;
+        let len = proto::CHUNK_STREAM_BYTES * 2;
         std::fs::write(&dest, b"").unwrap();
-        let big = proto::SPLIT_MIN_BYTES;
+        let big = proto::CHUNK_STREAM_BYTES;
         std::fs::write(
             sidecar_path(&dest),
             format!("0 {big}\n{big} {big}\n{} 5\n", len),
@@ -1067,7 +1065,7 @@ mod tests {
     fn holes_are_not_trusted() {
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("big.bin");
-        let big = proto::SPLIT_MIN_BYTES;
+        let big = proto::CHUNK_STREAM_BYTES;
         std::fs::write(&dest, b"").unwrap();
         std::fs::write(sidecar_path(&dest), format!("{big} {big}\n")).unwrap();
         let runtime = tokio::runtime::Builder::new_current_thread()
