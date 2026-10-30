@@ -57,6 +57,7 @@ pub struct ServerOpts {
 pub struct RuntimeSettings {
     out_dir: std::sync::RwLock<PathBuf>,
     policy: std::sync::RwLock<Policy>,
+    concurrency: std::sync::RwLock<usize>,
 }
 
 impl RuntimeSettings {
@@ -64,6 +65,7 @@ impl RuntimeSettings {
         Self {
             out_dir: std::sync::RwLock::new(out_dir),
             policy: std::sync::RwLock::new(policy),
+            concurrency: std::sync::RwLock::new(8),
         }
     }
 
@@ -79,6 +81,21 @@ impl RuntimeSettings {
 
     pub fn policy(&self) -> Policy {
         self.policy.read().map(|p| *p).unwrap_or_default()
+    }
+
+    /// Parallel file streams used by outbound transfers.
+    pub fn concurrency(&self) -> usize {
+        self.concurrency
+            .read()
+            .map(|c| *c)
+            .unwrap_or(8)
+            .clamp(1, 16)
+    }
+
+    pub fn set_concurrency(&self, value: usize) {
+        if let Ok(mut slot) = self.concurrency.write() {
+            *slot = value.clamp(1, 16);
+        }
     }
 
     pub fn set_policy(&self, policy: Policy) {

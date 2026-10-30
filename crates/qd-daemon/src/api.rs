@@ -27,6 +27,7 @@ pub fn router(inner: Arc<Inner>) -> Router {
         .route("/api/peers", get(peers))
         .route("/api/transfers", get(transfers))
         .route("/api/transfers/{id}/cancel", post(cancel_transfer))
+        .route("/api/transfers/clear", post(clear_transfers))
         .route("/api/approvals", get(approvals))
         .route("/api/approvals/{id}", post(respond_approval))
         .route("/api/trust", get(trust_list).post(trust_add))
@@ -121,6 +122,8 @@ struct ConfigPatch {
     out_dir: Option<PathBuf>,
     #[serde(default)]
     policy: Option<Policy>,
+    #[serde(default)]
+    concurrency: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -149,6 +152,7 @@ async fn status(State(inner): State<Arc<Inner>>) -> Json<Value> {
         "quic_port": inner.quic_port,
         "discovery_port": inner.discovery_port,
         "local_addrs": inner.local_addrs,
+        "config_dir": qd_core::Identity::config_dir().display().to_string(),
         "out_dir": inner.runtime.out_dir(),
         "policy": inner.runtime.policy(),
         "uptime_secs": now.saturating_sub(inner.started_at),
@@ -273,11 +277,14 @@ async fn send(
             Err(e) => return Err(bad_request(format!("cannot read {}: {e}", path.display()))),
         }
     }
+    let concurrency = body
+        .concurrency
+        .unwrap_or_else(|| inner.runtime.concurrency());
     let id = spawn_send(
         inner,
         body.to,
         body.paths,
-        body.concurrency.unwrap_or(8),
+        concurrency,
         Duration::from_secs(body.timeout_secs.unwrap_or(5).max(1)),
     );
     Ok(Json(json!({ "id": id })))
@@ -299,10 +306,16 @@ async fn cancel_transfer(
     Err(not_found(format!("no active transfer {id}")))
 }
 
+async fn clear_transfers(State(inner): State<Arc<Inner>>) -> Json<Value> {
+    inner.clear_transfers();
+    Json(json!({ "ok": true }))
+}
+
 async fn config(State(inner): State<Arc<Inner>>) -> Json<Value> {
     Json(json!({
         "out_dir": inner.runtime.out_dir(),
         "policy": inner.runtime.policy(),
+        "concurrency": inner.runtime.concurrency(),
     }))
 }
 
@@ -317,6 +330,9 @@ async fn patch_config(
     }
     if let Some(policy) = body.policy {
         inner.runtime.set_policy(policy);
+    }
+    if let Some(concurrency) = body.concurrency {
+        inner.runtime.set_concurrency(concurrency);
     }
     inner.broadcast(DaemonEvent::Config {
         out_dir: inner.runtime.out_dir().display().to_string(),

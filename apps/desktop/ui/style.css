@@ -368,6 +368,7 @@ select {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
   padding: 6px;
   font-size: 11.5px;
   color: var(--text-3);
@@ -1026,4 +1027,131 @@ select.input {
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+/* settings */
+.modal.settings {
+  width: 640px;
+  max-width: calc(100vw - 48px);
+}
+
+.settings-body {
+  display: grid;
+  grid-template-columns: 148px minmax(0, 1fr);
+  min-height: 288px;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.settings-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px;
+  border-right: 1px solid var(--line);
+  background: var(--surface-2, transparent);
+}
+
+.settings-nav button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  padding: 0 8px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--muted);
+  text-align: left;
+  background: none;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.settings-nav button:hover {
+  color: var(--text);
+  background: var(--hover, rgba(127, 127, 127, 0.08));
+}
+
+.settings-nav button.active {
+  color: var(--text);
+  background: var(--hover, rgba(127, 127, 127, 0.12));
+  font-weight: 600;
+}
+
+.settings-nav svg {
+  width: 13px;
+  height: 13px;
+}
+
+.settings-panes {
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.settings-panes .row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.kv {
+  display: grid;
+  grid-template-columns: 84px minmax(0, 1fr);
+  gap: 6px 10px;
+  font-size: 12px;
+}
+
+.kv span {
+  color: var(--muted);
+}
+
+.kv code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 11px;
+  color: var(--text);
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.check input {
+  width: 13px;
+  height: 13px;
+  accent-color: var(--accent);
+}
+
+[data-density="compact"] .peer {
+  padding-block: 4px;
+}
+
+[data-density="compact"] .transfer {
+  padding-block: 4px;
+}
+
+[data-density="compact"] .file-row {
+  padding-block: 3px;
+}
+
+[data-density="compact"] .trust-item {
+  padding-block: 2px;
+}
+
+[data-motion="off"] *,
+[data-motion="off"] *::before,
+[data-motion="off"] *::after {
+  animation: none !important;
+  transition: none !important;
 }

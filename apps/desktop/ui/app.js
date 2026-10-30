@@ -105,31 +105,48 @@ function rateFor(transfer) {
 }
 
 
-const THEME_KEY = "quicdrop-theme";
+const PREFS_KEY = "quicdrop-prefs";
+const prefs = {
+  theme: "system",
+  density: "comfortable",
+  motion: true,
+  openAfter: false,
+};
 
-function applyTheme(theme) {
-  document.documentElement.dataset.theme = theme;
+function loadPrefs() {
+  try {
+    Object.assign(prefs, JSON.parse(localStorage.getItem(PREFS_KEY) || "{}"));
+  } catch (_) {
+    /* first run */
+  }
+  applyPrefs();
 }
 
-function initTheme() {
-  let saved = null;
+function savePrefs() {
   try {
-    saved = localStorage.getItem(THEME_KEY);
+    localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
   } catch (_) {
     /* ignore */
   }
-  const prefersLight = window.matchMedia("(prefers-color-scheme: light)").matches;
-  applyTheme(saved || (prefersLight ? "light" : "dark"));
+  applyPrefs();
+}
+
+function resolvedTheme() {
+  if (prefs.theme !== "system") return prefs.theme;
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+
+function applyPrefs() {
+  const root = document.documentElement;
+  root.dataset.theme = resolvedTheme();
+  root.dataset.density = prefs.density;
+  root.dataset.motion = prefs.motion ? "on" : "off";
 }
 
 function toggleTheme() {
-  const next = document.documentElement.dataset.theme === "light" ? "dark" : "light";
-  applyTheme(next);
-  try {
-    localStorage.setItem(THEME_KEY, next);
-  } catch (_) {
-    /* ignore */
-  }
+  const order = ["system", "light", "dark"];
+  prefs.theme = order[(order.indexOf(prefs.theme) + 1) % order.length];
+  savePrefs();
 }
 
 let toastTimer;
@@ -230,7 +247,7 @@ function renderPeers() {
     list.innerHTML = `
       <li class="peer-empty">
         <div class="radar"></div>
-        <div>No devices yet. Open QuicDrop on another device on the same Wi-Fi.</div>
+        <div>No devices nearby.</div>
       </li>`;
     return;
   }
@@ -291,7 +308,7 @@ function renderTrust() {
   $("trust-count").textContent = state.trust.length;
   const list = $("trust-list");
   if (state.trust.length === 0) {
-    list.innerHTML = `<li class="hint" style="padding:4px 6px">No devices trusted yet.</li>`;
+    list.innerHTML = `<li class="hint" style="padding:4px 6px">None</li>`;
     return;
   }
   list.innerHTML = state.trust
@@ -346,7 +363,7 @@ function renderTransfers() {
         : `${state.transfers.length} recent`;
 
   if (state.transfers.length === 0) {
-    list.innerHTML = `<li class="empty">Nothing transferred yet.</li>`;
+    list.innerHTML = `<li class="empty">Nothing yet.</li>`;
     return;
   }
   list.innerHTML = state.transfers
@@ -505,33 +522,87 @@ async function forget(deviceId) {
   }
 }
 
+function showPane(name) {
+  document
+    .querySelectorAll("#settings-nav button")
+    .forEach((b) => b.classList.toggle("active", b.dataset.pane === name));
+  document
+    .querySelectorAll(".settings-panes section")
+    .forEach((s) => (s.hidden = s.dataset.pane !== name));
+}
+
 async function openSettings() {
   try {
     state.config = await api("GET", "/api/config");
   } catch (_) {
     /* use cached */
   }
+  const info = state.info || {};
+  $("settings-theme").value = prefs.theme;
+  $("settings-density").value = prefs.density;
+  $("settings-motion").checked = prefs.motion;
+  $("settings-open-after").checked = prefs.openAfter;
   $("settings-out").value = state.config.out_dir || "";
   $("settings-policy").value = state.config.policy || "ask";
+  $("settings-concurrency").value = String(state.config.concurrency || 8);
+  $("about-version").textContent = info.version || "—";
+  $("about-platform").textContent = info.platform || "—";
+  $("about-name").textContent = info.name || "—";
+  $("about-id").textContent = info.device_id || "—";
+  $("about-config").textContent = info.config_dir || "—";
+  $("about-quic").textContent = info.quic_port ? `udp/${info.quic_port}` : "—";
+  $("about-disc").textContent = info.discovery_port ? `udp/${info.discovery_port}` : "—";
+  $("about-addrs").textContent = (info.local_addrs || []).join(", ") || "—";
+  $("settings-hint").textContent = "";
+  showPane("general");
   $("settings-modal").hidden = false;
 }
 
 async function saveSettings() {
+  prefs.theme = $("settings-theme").value;
+  prefs.density = $("settings-density").value;
+  prefs.motion = $("settings-motion").checked;
+  prefs.openAfter = $("settings-open-after").checked;
+  savePrefs();
+
   const out_dir = $("settings-out").value.trim();
   const policy = $("settings-policy").value;
+  const concurrency = Number($("settings-concurrency").value) || 8;
   try {
-    await api("PATCH", "/api/config", { out_dir: out_dir || undefined, policy });
-    state.config = { out_dir, policy };
+    await api("PATCH", "/api/config", { out_dir: out_dir || undefined, policy, concurrency });
+    state.config = { ...state.config, out_dir, policy, concurrency };
     $("settings-modal").hidden = true;
     toast("Settings saved");
   } catch (error) {
-    toast(`Could not save settings: ${error}`);
+    $("settings-hint").textContent = String(error);
   }
 }
 
 
 $("btn-theme").addEventListener("click", toggleTheme);
 $("settings-close").addEventListener("click", () => ($("settings-modal").hidden = true));
+$("settings-nav").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-pane]");
+  if (button) showPane(button.dataset.pane);
+});
+$("settings-clear").addEventListener("click", async () => {
+  try {
+    await api("POST", "/api/transfers/clear");
+    state.transfers = [];
+    renderTransfers();
+    $("settings-hint").textContent = "History cleared.";
+  } catch (error) {
+    $("settings-hint").textContent = String(error);
+  }
+});
+$("about-copy").addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText(state.info.device_id || "");
+    $("settings-hint").textContent = "Device id copied.";
+  } catch (_) {
+    $("settings-hint").textContent = "Could not copy.";
+  }
+});
 $("btn-send").addEventListener("click", sendToSelected);
 $("transfer-search").addEventListener("input", (event) => {
   state.fileQuery = event.target.value;
@@ -575,10 +646,16 @@ async function handleEvent(payload) {
       upsertPeer(payload.peer);
       renderPeers();
       break;
-    case "session":
+    case "session": {
+      const before = state.transfers.find((t) => t.id === payload.transfer.id);
       upsertTransfer(payload.transfer);
       renderTransfers();
+      const t = payload.transfer;
+      if (prefs.openAfter && t.direction === "in" && t.status === "done" && before?.status !== "done") {
+        invoke("open_path", { path: state.config.out_dir }).catch(() => {});
+      }
       break;
+    }
     case "file": {
       const transfer = state.transfers.find((t) => t.id === payload.id);
       if (transfer && transfer.files[payload.index]) {
@@ -642,7 +719,7 @@ async function setupDragDrop() {
 }
 
 (async function boot() {
-  initTheme();
+  loadPrefs();
   try {
     state.info = await invoke("daemon_info");
   } catch (error) {

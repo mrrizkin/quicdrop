@@ -247,6 +247,13 @@ impl Inner {
         transfers.iter().rev().take(limit).cloned().collect()
     }
 
+    /// Drop finished history entries, keep transfers still in flight.
+    pub fn clear_transfers(&self) {
+        if let Ok(mut transfers) = self.transfers.lock() {
+            transfers.retain(|t| t.status == TransferStatus::Active);
+        }
+    }
+
     pub fn pending_approvals(&self) -> Vec<ApprovalView> {
         self.approvals
             .lock()

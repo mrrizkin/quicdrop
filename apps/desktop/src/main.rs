@@ -105,6 +105,22 @@ async fn pick_files(app: tauri::AppHandle) -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
+async fn open_path(path: String) -> Result<(), String> {
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(target_os = "windows") {
+        "explorer"
+    } else {
+        "xdg-open"
+    };
+    std::process::Command::new(opener)
+        .arg(&path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("cannot open {path}: {e}"))
+}
+
+#[tauri::command]
 async fn pick_folders(app: tauri::AppHandle) -> Result<Vec<String>, String> {
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.dialog().file().pick_folders(move |paths| {
@@ -190,7 +206,8 @@ fn main() {
             daemon_info,
             pick_files,
             pick_folder,
-            pick_folders
+            pick_folders,
+            open_path
         ])
         .build(tauri::generate_context!())
         .expect("build tauri app")

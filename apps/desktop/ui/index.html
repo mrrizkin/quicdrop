@@ -18,7 +18,8 @@
       <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></symbol>
       <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
       <symbol id="i-moon" viewBox="0 0 24 24"><path d="M21 12.8A8.5 8.5 0 1 1 11.2 3a6.5 6.5 0 0 0 9.8 9.8z"/></symbol>
-      <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/></symbol>
+      <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 8h.01"/></symbol>
+        <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/></symbol>
       <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></symbol>
       <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></symbol>
       <symbol id="i-alert" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/></symbol>
@@ -87,7 +88,7 @@
         </header>
 
         <ul class="transfers" id="transfer-list">
-          <li class="empty">Nothing transferred yet.</li>
+          <li class="empty">Nothing yet.</li>
         </ul>
       </main>
     </div>
@@ -117,7 +118,7 @@
     </div>
 
     <div class="modal-backdrop" id="settings-modal" hidden>
-      <div class="modal">
+      <div class="modal settings">
         <div class="modal-head">
           <svg class="i"><use href="#i-sliders"/></svg>
           <div class="modal-title"><strong>Settings</strong></div>
@@ -125,28 +126,104 @@
             <svg class="i"><use href="#i-x"/></svg>
           </button>
         </div>
-        <div class="modal-body">
-          <label class="field">
-            <span>Save to</span>
-            <div class="row">
-              <input class="input mono" id="settings-out" type="text" spellcheck="false" />
-              <button class="icon-btn" id="settings-browse" title="Browse" aria-label="Browse">
-                <svg class="i"><use href="#i-folder"/></svg>
-              </button>
-            </div>
-          </label>
-          <label class="field">
-            <span>New devices</span>
-            <select class="input" id="settings-policy">
-              <option value="ask">Ask</option>
-              <option value="auto">Accept</option>
-              <option value="deny">Reject</option>
-            </select>
-          </label>
+
+        <div class="settings-body">
+          <nav class="settings-nav" id="settings-nav">
+            <button class="active" data-pane="general"><svg class="i"><use href="#i-sliders"/></svg>General</button>
+            <button data-pane="files"><svg class="i"><use href="#i-folder"/></svg>Files</button>
+            <button data-pane="network"><svg class="i"><use href="#i-shield"/></svg>Network</button>
+            <button data-pane="about"><svg class="i"><use href="#i-info"/></svg>About</button>
+          </nav>
+
+          <div class="settings-panes">
+            <section data-pane="general">
+              <label class="field">
+                <span>Theme</span>
+                <select class="input" id="settings-theme">
+                  <option value="system">System</option>
+                  <option value="light">Light</option>
+                  <option value="dark">Dark</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Density</span>
+                <select class="input" id="settings-density">
+                  <option value="comfortable">Comfortable</option>
+                  <option value="compact">Compact</option>
+                </select>
+              </label>
+              <label class="check">
+                <input type="checkbox" id="settings-motion" />
+                <span>Animations</span>
+              </label>
+              <label class="check">
+                <input type="checkbox" id="settings-open-after" />
+                <span>Open folder after receiving</span>
+              </label>
+            </section>
+
+            <section data-pane="files" hidden>
+              <label class="field">
+                <span>Save to</span>
+                <div class="row">
+                  <input class="input mono" id="settings-out" type="text" spellcheck="false" />
+                  <button class="icon-btn" id="settings-browse" title="Browse" aria-label="Browse">
+                    <svg class="i"><use href="#i-folder"/></svg>
+                  </button>
+                </div>
+              </label>
+              <div class="row">
+                <span class="dim grow">Finished transfers stay in this window until cleared.</span>
+                <button class="btn" id="settings-clear">Clear history</button>
+              </div>
+            </section>
+
+            <section data-pane="network" hidden>
+              <label class="field">
+                <span>Unknown devices</span>
+                <select class="input" id="settings-policy">
+                  <option value="ask">Ask</option>
+                  <option value="auto">Accept</option>
+                  <option value="deny">Reject</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Parallel streams</span>
+                <select class="input" id="settings-concurrency">
+                  <option value="2">2</option>
+                  <option value="4">4</option>
+                  <option value="8">8</option>
+                  <option value="12">12</option>
+                  <option value="16">16</option>
+                </select>
+              </label>
+              <div class="kv">
+                <span>QUIC</span><code id="about-quic">—</code>
+                <span>Discovery</span><code id="about-disc">—</code>
+                <span>Local</span><code id="about-addrs">—</code>
+              </div>
+            </section>
+
+            <section data-pane="about" hidden>
+              <div class="kv">
+                <span>Version</span><code id="about-version">—</code>
+                <span>Platform</span><code id="about-platform">—</code>
+                <span>Device</span><code id="about-name">—</code>
+                <span>Device id</span>
+                <code id="about-id">—</code>
+                <span>Config</span><code id="about-config">—</code>
+              </div>
+              <div class="row end">
+                <button class="btn" id="about-copy">Copy device id</button>
+              </div>
+            </section>
+          </div>
         </div>
+
         <div class="modal-foot">
-          <button class="btn" id="settings-cancel">Cancel</button>
+          <span class="dim" id="settings-hint"></span>
           <span class="grow"></span>
+          <button class="btn" id="settings-cancel">Close</button>
           <button class="btn primary" id="settings-save">Save</button>
         </div>
       </div>
