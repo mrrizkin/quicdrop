@@ -9,11 +9,11 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::Semaphore;
 use tracing::{debug, info};
 
-use crate::progress::Progress;
+use crate::progress::{Progress, ProgressSink};
 use crate::proto::{self, AcceptFile, FileAck, FileHeader, FileMeta, FileTrailer, Frame};
 use crate::util::{human_bytes, human_rate};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SendOpts {
     pub addr: SocketAddr,
     /// Pinned device id of the receiver (prefix allowed). `None` accepts any peer.
@@ -21,6 +21,23 @@ pub struct SendOpts {
     pub files: Vec<PathBuf>,
     pub concurrency: usize,
     pub quiet: bool,
+    /// Name announced to the receiver (defaults to the persisted device name).
+    pub name: Option<String>,
+    /// Optional live progress observer for embedders.
+    pub progress: Option<ProgressSink>,
+}
+
+impl std::fmt::Debug for SendOpts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SendOpts")
+            .field("addr", &self.addr)
+            .field("device_id", &self.device_id)
+            .field("files", &self.files)
+            .field("concurrency", &self.concurrency)
+            .field("name", &self.name)
+            .field("progress", &self.progress.is_some())
+            .finish()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -65,7 +82,7 @@ pub async fn send(opts: SendOpts) -> Result<Summary> {
     debug!("connected to {} in one RTT", conn.remote_address());
 
     let session = new_session_id();
-    let identity = crate::identity::Identity::load_or_create(None)?;
+    let identity = crate::identity::Identity::load_or_create(opts.name.clone())?;
     let (mut ctrl_send, mut ctrl_recv) = conn.open_bi().await.context("open control stream")?;
     proto::write_frame(
         &mut ctrl_send,
@@ -123,7 +140,10 @@ pub async fn send(opts: SendOpts) -> Result<Summary> {
         })
         .sum();
 
-    let progress = Arc::new(Progress::new(accepted_total));
+    let progress = Arc::new(match &opts.progress {
+        Some(sink) => Progress::with_sink(accepted_total, sink.clone()),
+        None => Progress::new(accepted_total),
+    });
     let reporter = progress.clone();
     let quiet = opts.quiet;
     let reporter_handle = tokio::spawn(async move { reporter.run(quiet).await });

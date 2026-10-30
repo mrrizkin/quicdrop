@@ -1,14 +1,23 @@
 use std::io::{IsTerminal, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::util::{human_bytes, human_rate};
+
+/// Observer for transfer progress, called with `(done, total)`.
+///
+/// Sinks are throttled to ~10 updates per second (plus one final update) so a
+/// GUI or event stream is not flooded by 512 KiB chunks.
+pub type ProgressSink = Arc<dyn Fn(u64, u64) + Send + Sync>;
 
 /// Shared byte counter plus a live progress line on stderr.
 pub struct Progress {
     total: u64,
     done: AtomicU64,
     started: Instant,
+    sink: Option<ProgressSink>,
+    last_emit_ms: AtomicU64,
 }
 
 impl Progress {
@@ -17,6 +26,15 @@ impl Progress {
             total,
             done: AtomicU64::new(0),
             started: Instant::now(),
+            sink: None,
+            last_emit_ms: AtomicU64::new(0),
+        }
+    }
+
+    pub fn with_sink(total: u64, sink: ProgressSink) -> Self {
+        Self {
+            sink: Some(sink),
+            ..Self::new(total)
         }
     }
 
@@ -25,7 +43,15 @@ impl Progress {
     }
 
     pub fn add(&self, n: u64) {
-        self.done.fetch_add(n, Ordering::Relaxed);
+        let done = self.done.fetch_add(n, Ordering::Relaxed) + n;
+        if let Some(sink) = &self.sink {
+            let now_ms = self.started.elapsed().as_millis() as u64;
+            let last = self.last_emit_ms.load(Ordering::Relaxed);
+            if done >= self.total || now_ms.saturating_sub(last) >= 100 {
+                self.last_emit_ms.store(now_ms, Ordering::Relaxed);
+                sink(done, self.total);
+            }
+        }
     }
 
     pub fn done(&self) -> u64 {

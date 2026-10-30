@@ -20,6 +20,22 @@ pub fn human_rate(bytes_per_sec: f64) -> String {
     format!("{}/s", human_bytes(bytes_per_sec as u64))
 }
 
+/// Relative age of a unix timestamp, e.g. `3m ago`.
+pub fn human_age(unix_secs: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let elapsed = now.saturating_sub(unix_secs);
+    match elapsed {
+        0..=59 => "just now".to_string(),
+        60..=3599 => format!("{}m ago", elapsed / 60),
+        3600..=86_399 => format!("{}h ago", elapsed / 3600),
+        86_400..=604_799 => format!("{}d ago", elapsed / 86_400),
+        _ => format!("{}w ago", elapsed / 604_800),
+    }
+}
+
 /// Strip any directory component and hostile characters from a peer supplied name.
 ///
 /// A receiver must never trust the sender's filename: `../../.ssh/authorized_keys` is a
@@ -121,5 +137,17 @@ mod tests {
     fn formats_sizes() {
         assert_eq!(human_bytes(512), "512 B");
         assert_eq!(human_bytes(1536), "1.50 KiB");
+    }
+
+    #[test]
+    fn formats_ages() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert_eq!(human_age(now), "just now");
+        assert_eq!(human_age(now - 120), "2m ago");
+        assert_eq!(human_age(now - 7200), "2h ago");
+        assert_eq!(human_age(now - 172_800), "2d ago");
     }
 }

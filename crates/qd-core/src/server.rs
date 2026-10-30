@@ -9,13 +9,27 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
 
+use crate::approval::{ApprovalRequest, ApprovalSender, Decision, APPROVAL_TIMEOUT};
 use crate::discovery::{self, Discovery};
 use crate::identity::Identity;
 use crate::progress::Progress;
 use crate::proto::{self, AcceptFile, FileAck, FileHeader, FileMeta, FileTrailer, Frame};
+use crate::trust::TrustStore;
 use crate::util::{human_bytes, human_rate, sanitize_file_name, unique_path};
 
-#[derive(Debug, Clone)]
+/// What to do with a transfer from a device that is not in the trust store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Policy {
+    /// Ask the user (or the embedding UI) for every unknown device.
+    #[default]
+    Ask,
+    /// Accept everything without asking (useful for tests and trusted networks).
+    Auto,
+    /// Reject everything, trusted or not.
+    Deny,
+}
+
+#[derive(Clone)]
 pub struct ServerOpts {
     pub quic_port: u16,
     pub discovery_port: u16,
@@ -23,6 +37,85 @@ pub struct ServerOpts {
     pub name: Option<String>,
     /// Answer discovery probes with a summary of what is on disk (unused placeholder).
     pub quiet: bool,
+    /// Policy for devices that are not in the trust store.
+    pub policy: Policy,
+    /// Approved devices. Defaults to the store in the config dir.
+    pub trust: TrustStore,
+    /// Where approval requests go. `None` means unknown devices are rejected.
+    pub approver: Option<ApprovalSender>,
+    /// Structured session events for embedders (daemon, GUI).
+    pub events: Option<ServerEventSink>,
+}
+
+impl std::fmt::Debug for ServerOpts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServerOpts")
+            .field("quic_port", &self.quic_port)
+            .field("discovery_port", &self.discovery_port)
+            .field("out_dir", &self.out_dir)
+            .field("name", &self.name)
+            .field("policy", &self.policy)
+            .field("approver", &self.approver.is_some())
+            .field("events", &self.events.is_some())
+            .finish()
+    }
+}
+
+/// Structured lifecycle events emitted by the receiver.
+#[derive(Debug, Clone)]
+pub enum ServerEvent {
+    /// A sender was accepted and the transfer is about to start.
+    Session {
+        peer_id: String,
+        peer_name: String,
+        files: usize,
+        total_bytes: u64,
+    },
+    Progress {
+        peer_id: String,
+        done: u64,
+        total: u64,
+    },
+    File {
+        peer_id: String,
+        name: String,
+        bytes: u64,
+        ok: bool,
+    },
+    Done {
+        peer_id: String,
+        bytes: u64,
+        failures: usize,
+    },
+    Declined {
+        peer_id: String,
+        peer_name: String,
+        reason: String,
+    },
+}
+
+pub type ServerEventSink = Arc<dyn Fn(ServerEvent) + Send + Sync>;
+
+fn emit(opts: &ServerOpts, event: ServerEvent) {
+    if let Some(sink) = &opts.events {
+        sink(event);
+    }
+}
+
+impl ServerOpts {
+    pub fn new(quic_port: u16, discovery_port: u16, out_dir: PathBuf) -> Self {
+        Self {
+            quic_port,
+            discovery_port,
+            out_dir,
+            name: None,
+            quiet: false,
+            policy: Policy::default(),
+            trust: TrustStore::default(),
+            approver: None,
+            events: None,
+        }
+    }
 }
 
 pub struct RunningServer {
@@ -87,10 +180,19 @@ pub async fn serve(mut server: RunningServer, opts: ServerOpts) -> Result<()> {
     );
     info!("saving to {}", opts.out_dir.display());
 
+    accept_loop(server.endpoint.clone(), server.identity.clone(), opts).await
+}
+
+/// Accept connections on `endpoint` until it is closed.
+pub async fn accept_loop(
+    endpoint: quinn::Endpoint,
+    identity: Arc<Identity>,
+    opts: ServerOpts,
+) -> Result<()> {
     let opts = Arc::new(opts);
-    while let Some(incoming) = server.endpoint.accept().await {
+    while let Some(incoming) = endpoint.accept().await {
         let opts = opts.clone();
-        let identity = server.identity.clone();
+        let identity = identity.clone();
         tokio::spawn(async move {
             let remote = incoming.remote_address();
             let conn = match incoming.accept() {
@@ -128,12 +230,12 @@ async fn handle_connection(
     let (mut ctrl_send, mut ctrl_recv) = conn.accept_bi().await.context("accept control stream")?;
 
     let hello: Frame = proto::read_msg(&mut ctrl_recv).await?;
-    let (sender_id, sender_name) = match hello {
+    let (sender_id, sender_name, sender_platform) = match hello {
         Frame::Hello {
             version,
             device_id,
             name,
-            ..
+            platform,
         } => {
             if version != proto::PROTO_VERSION {
                 let msg = format!("unsupported protocol version {version}");
@@ -146,7 +248,7 @@ async fn handle_connection(
                 .await;
                 bail!(msg);
             }
-            (device_id, name)
+            (device_id, name, platform)
         }
         other => bail!("expected hello, got {other:?}"),
     };
@@ -182,6 +284,31 @@ async fn handle_connection(
         )
         .await;
         bail!("empty offer");
+    }
+
+    // Ask before touching the disk: a declined transfer must not create files.
+    let decision = decide(&opts, &sender_id, &sender_name, &sender_platform, &files).await;
+    if let Decision::Reject { reason } = decision {
+        info!("declined transfer from \"{sender_name}\": {reason}");
+        emit(
+            &opts,
+            ServerEvent::Declined {
+                peer_id: sender_id.clone(),
+                peer_name: sender_name.clone(),
+                reason: reason.clone(),
+            },
+        );
+        let _ = proto::write_frame(
+            &mut ctrl_send,
+            &Frame::Reject {
+                session,
+                reason: reason.clone(),
+            },
+        )
+        .await;
+        let _ = ctrl_send.finish();
+        conn.close(0u32.into(), b"rejected");
+        return Ok(());
     }
 
     // Decide destination paths *before* accepting so the offsets we report are the
@@ -235,7 +362,32 @@ async fn handle_connection(
             .collect(),
     );
 
-    let progress = Arc::new(Progress::new(total));
+    let progress = Arc::new(match &opts.events {
+        Some(sink) => {
+            let sink = sink.clone();
+            let peer_id = sender_id.clone();
+            Progress::with_sink(
+                total,
+                Arc::new(move |done, total| {
+                    sink(ServerEvent::Progress {
+                        peer_id: peer_id.clone(),
+                        done,
+                        total,
+                    })
+                }),
+            )
+        }
+        None => Progress::new(total),
+    });
+    emit(
+        &opts,
+        ServerEvent::Session {
+            peer_id: sender_id.clone(),
+            peer_name: sender_name.clone(),
+            files: plan.len(),
+            total_bytes: total,
+        },
+    );
     let reporter = progress.clone();
     let quiet = opts.quiet;
     let reporter_handle = tokio::spawn(async move { reporter.run(quiet).await });
@@ -256,6 +408,15 @@ async fn handle_connection(
                         if !ok { failures += 1; }
                         let status = if ok { "ok" } else { "FAILED" };
                         println!("  {status:<7} {name} ({})", human_bytes(bytes));
+                        emit(
+                            &opts,
+                            ServerEvent::File {
+                                peer_id: sender_id.clone(),
+                                name,
+                                bytes,
+                                ok,
+                            },
+                        );
                     }
                     Some(Ok(Err(e))) => {
                         finished += 1;
@@ -312,9 +473,89 @@ async fn handle_connection(
         }
     );
 
+    // Wait for the sender to close the control stream (it sends Bye after it has
+    // read every file ack). Closing the connection earlier can drop those acks.
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        ctrl_recv.read_to_end(64 * 1024),
+    )
+    .await;
+
     let _ = ctrl_send.finish();
     conn.close(0u32.into(), b"done");
+    emit(
+        &opts,
+        ServerEvent::Done {
+            peer_id: sender_id,
+            bytes: transferred,
+            failures,
+        },
+    );
     Ok(())
+}
+
+/// Decide whether to accept a transfer from `peer_id`.
+///
+/// Trusted devices are accepted silently, unknown ones follow `opts.policy`, and
+/// anything we cannot answer fails closed with a reason the sender can show.
+async fn decide(
+    opts: &ServerOpts,
+    peer_id: &str,
+    peer_name: &str,
+    peer_platform: &str,
+    files: &[FileMeta],
+) -> Decision {
+    match opts.policy {
+        Policy::Deny => {
+            return Decision::reject("receiver is not accepting transfers (policy: deny)")
+        }
+        Policy::Auto => return Decision::accept(),
+        Policy::Ask => {}
+    }
+
+    if opts.trust.is_trusted(peer_id) {
+        opts.trust.touch(peer_id);
+        info!("accepting transfer from trusted device \"{peer_name}\"");
+        return Decision::accept();
+    }
+
+    let Some(approver) = &opts.approver else {
+        return Decision::reject(
+            "receiver needs approval for new devices but has no UI; ask the owner to trust this device",
+        );
+    };
+
+    let (reply, rx) = tokio::sync::oneshot::channel();
+    let request = ApprovalRequest {
+        peer_id: peer_id.to_string(),
+        peer_name: peer_name.to_string(),
+        peer_platform: peer_platform.to_string(),
+        files: files.to_vec(),
+        total_bytes: files.iter().map(|f| f.size).sum(),
+        reply,
+    };
+    if approver.send(request).is_err() {
+        return Decision::reject("receiver approval channel is closed");
+    }
+
+    match tokio::time::timeout(APPROVAL_TIMEOUT, rx).await {
+        Ok(Ok(decision)) if decision.is_accept() => {
+            if decision.should_remember() {
+                if let Err(e) = opts.trust.remember(peer_id, peer_name, peer_platform) {
+                    warn!("could not save trust decision for \"{peer_name}\": {e:#}");
+                } else {
+                    info!("trusted \"{peer_name}\" ({peer_id})");
+                }
+            }
+            decision
+        }
+        Ok(Ok(decision)) => decision,
+        Ok(Err(_)) => Decision::reject("receiver did not answer"),
+        Err(_) => Decision::reject(format!(
+            "no answer within {}s",
+            APPROVAL_TIMEOUT.as_secs()
+        )),
+    }
 }
 
 /// Find an existing partial file with the expected final size.

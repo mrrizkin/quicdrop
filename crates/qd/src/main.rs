@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+use qd_core::approval;
 use qd_core::client::SendOpts;
-use qd_core::server::{serve, start, ServerOpts};
+use qd_core::server::{serve, start, Policy, ServerOpts};
+use qd_core::trust::TrustStore;
 use qd_core::{Identity, DEFAULT_DISCOVERY_PORT, DEFAULT_QUIC_PORT};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -48,6 +50,10 @@ enum Command {
         /// Directory to write files into
         #[arg(short, long)]
         out: Option<PathBuf>,
+
+        /// What to do with senders that are not trusted yet
+        #[arg(long, value_enum, default_value_t = PolicyArg::Ask)]
+        policy: PolicyArg,
     },
     /// Send one or more files to a peer
     Send {
@@ -75,6 +81,48 @@ enum Command {
     },
     /// Print this device's identity
     Id,
+    /// Manage devices that may send without asking
+    Trust {
+        #[command(subcommand)]
+        action: Option<TrustAction>,
+    },
+}
+
+#[derive(Subcommand)]
+enum TrustAction {
+    /// Trust a device by (a prefix of) its device id
+    Add {
+        /// Device id or unique prefix
+        id: String,
+        /// Friendly name to show in prompts
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Stop trusting a device
+    Rm {
+        /// Device id or unique prefix
+        id: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum PolicyArg {
+    /// Prompt before accepting a device that is not trusted
+    Ask,
+    /// Accept every transfer
+    Auto,
+    /// Reject every transfer
+    Deny,
+}
+
+impl From<PolicyArg> for Policy {
+    fn from(value: PolicyArg) -> Self {
+        match value {
+            PolicyArg::Ask => Policy::Ask,
+            PolicyArg::Auto => Policy::Auto,
+            PolicyArg::Deny => Policy::Deny,
+        }
+    }
 }
 
 #[tokio::main]
@@ -83,15 +131,15 @@ async fn main() -> Result<()> {
     init_tracing(cli.verbose);
 
     match cli.command {
-        Command::Receive { out } => {
+        Command::Receive { out, policy } => {
             let out_dir = out.unwrap_or_else(default_out_dir);
-            let opts = ServerOpts {
-                quic_port: cli.port,
-                discovery_port: cli.discovery_port,
-                out_dir,
-                name: cli.name,
-                quiet: cli.quiet,
-            };
+            let mut opts = ServerOpts::new(cli.port, cli.discovery_port, out_dir);
+            opts.name = cli.name;
+            opts.quiet = cli.quiet;
+            opts.policy = policy.into();
+            if opts.policy == Policy::Ask {
+                opts.approver = Some(approval::spawn_tty_approver());
+            }
             let server = start(opts.clone()).await?;
             println!(
                 "qd receiving as \"{}\" ({}) on {}",
@@ -126,6 +174,8 @@ async fn main() -> Result<()> {
                 files: paths,
                 concurrency,
                 quiet: cli.quiet,
+                name: cli.name,
+                progress: None,
             };
             let summary = qd_core::client::send(summary).await?;
             if summary.failed > 0 {
@@ -164,7 +214,54 @@ async fn main() -> Result<()> {
             println!("config:    {}", identity.dir.display());
             Ok(())
         }
+        Command::Trust { action } => match action {
+            None => list_trusted(),
+            Some(TrustAction::Add { id, name }) => {
+                let store = TrustStore::default();
+                let name = name.unwrap_or_else(|| format!("device {}", &id[..id.len().min(8)]));
+                store.remember(&id, &name, "")?;
+                println!("trusted {name} ({id})");
+                println!("store: {}", store.path().display());
+                Ok(())
+            }
+            Some(TrustAction::Rm { id }) => {
+                let store = TrustStore::default();
+                match store.forget_prefix(&id)? {
+                    Some(peer) => {
+                        println!("forgot {} ({})", peer.name, peer.device_id);
+                        Ok(())
+                    }
+                    None => anyhow::bail!("no trusted device matches \"{id}\""),
+                }
+            }
+        },
     }
+}
+
+fn list_trusted() -> Result<()> {
+    let store = TrustStore::default();
+    let peers = store.list();
+    if peers.is_empty() {
+        println!("no trusted devices yet");
+        println!("incoming transfers will ask for approval (policy: ask)");
+        return Ok(());
+    }
+    println!("{:<18} {:<22} {:<10} LAST SEEN", "ID", "NAME", "PLATFORM");
+    for peer in peers {
+        println!(
+            "{:<18} {:<22} {:<10} {}",
+            peer.device_id,
+            peer.name,
+            if peer.platform.is_empty() {
+                "-"
+            } else {
+                &peer.platform
+            },
+            qd_core::util::human_age(peer.last_seen)
+        );
+    }
+    println!("\nstore: {}", store.path().display());
+    Ok(())
 }
 
 async fn resolve_peer(
