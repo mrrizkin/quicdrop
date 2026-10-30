@@ -130,14 +130,22 @@ jobs:
         run: cargo tauri build --bundles deb,rpm,appimage
       - name: build windows
         if: runner.os == 'Windows'
-        run: cargo tauri build --bundles msi,nsis
+        shell: bash
+        run: |
+          # MSI caps ProductVersion at 255 per field, so the CalVer tag is folded
+          # into 0.<yy>.<week><patch> for that bundle only.
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' ../../Cargo.toml | head -1)
+          IFS=. read -r year week patch <<< "$version"
+          msi="0.$((10#$year % 100)).$((10#$week * 100 + 10#$patch))"
+          cargo tauri build --bundles nsis
+          cargo tauri build --bundles msi --config "{\"version\":\"$msi\"}"
       - name: build macos
         if: runner.os == 'macOS'
         run: cargo tauri build --target universal-apple-darwin --bundles app,dmg
       - name: collect
         shell: bash
         run: |
-          version=$(sed -n 's/^version = "\(.*\)"/\1/p' ../Cargo.toml | head -1)
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' ../../Cargo.toml | head -1)
           out="../dist/quicdrop-${version}-${{ matrix.name }}"
           mkdir -p "$out"
           if [ "$RUNNER_OS" = "macOS" ]; then
