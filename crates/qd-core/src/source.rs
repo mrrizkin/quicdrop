@@ -5,6 +5,7 @@ use anyhow::{bail, Context, Result};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+use crate::proto::MAX_NAME_LEN;
 use crate::util::wire_path;
 
 /// Refuse absurd offers before they reach the peer.
@@ -20,13 +21,43 @@ pub struct SourceFile {
     pub size: u64,
 }
 
+/// Identity of a file on disk, used to drop duplicates. On unix this is
+/// `(st_dev, st_ino)` from metadata the walk already read.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct FileKey {
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+    #[cfg(not(unix))]
+    path: PathBuf,
+}
+
+impl FileKey {
+    #[cfg(unix)]
+    fn of(_path: &Path, meta: &std::fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt;
+        Self {
+            dev: meta.dev(),
+            ino: meta.ino(),
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn of(path: &Path, _meta: &std::fs::Metadata) -> Self {
+        Self {
+            path: std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()),
+        }
+    }
+}
+
 /// Expand files and folders into a deterministic list of [`SourceFile`]s.
 ///
 /// Directories are walked recursively without following symlinks; a folder named
 /// `photos` containing `2024/a.jpg` becomes the file `photos/2024/a.jpg`.
 pub fn expand(inputs: &[PathBuf]) -> Result<Vec<SourceFile>> {
     let mut out = Vec::new();
-    let mut seen: HashSet<PathBuf> = HashSet::new();
+    let mut seen: HashSet<FileKey> = HashSet::new();
 
     for input in inputs {
         let meta =
@@ -37,7 +68,7 @@ pub fn expand(inputs: &[PathBuf]) -> Result<Vec<SourceFile>> {
                 &mut seen,
                 input.clone(),
                 root_name(input, "file"),
-                meta.len(),
+                &meta,
             )?;
         } else if meta.is_dir() {
             let root = root_name(input, "folder");
@@ -65,7 +96,7 @@ fn walk(
     rel: &Path,
     depth: usize,
     out: &mut Vec<SourceFile>,
-    seen: &mut HashSet<PathBuf>,
+    seen: &mut HashSet<FileKey>,
 ) -> Result<()> {
     if depth > MAX_DEPTH {
         bail!("folder nesting deeper than {MAX_DEPTH}: {}", dir.display());
@@ -74,7 +105,8 @@ fn walk(
         .with_context(|| format!("cannot list {}", dir.display()))?
         .collect::<std::io::Result<Vec<_>>>()
         .with_context(|| format!("cannot list {}", dir.display()))?;
-    entries.sort_by_key(|e| e.file_name());
+    // One key per entry, not one per comparison.
+    entries.sort_by_cached_key(std::fs::DirEntry::file_name);
 
     for entry in entries {
         let file_type = entry
@@ -88,8 +120,10 @@ fn walk(
         if file_type.is_dir() {
             walk(&entry.path(), &rel_child, depth + 1, out, seen)?;
         } else if file_type.is_file() {
-            let size = entry.metadata()?.len();
-            add_file(out, seen, entry.path(), wire_path(&rel_child), size)?;
+            let meta = entry
+                .metadata()
+                .with_context(|| format!("cannot inspect {}", entry.path().display()))?;
+            add_file(out, seen, entry.path(), wire_path(&rel_child), &meta)?;
         }
     }
     Ok(())
@@ -97,23 +131,29 @@ fn walk(
 
 fn add_file(
     out: &mut Vec<SourceFile>,
-    seen: &mut HashSet<PathBuf>,
+    seen: &mut HashSet<FileKey>,
     path: PathBuf,
     name: String,
-    size: u64,
+    meta: &std::fs::Metadata,
 ) -> Result<()> {
-    if out.len() >= MAX_FILES {
-        bail!("too many files (limit {MAX_FILES})");
-    }
-    let key = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
-    if !seen.insert(key) {
+    if !seen.insert(FileKey::of(&path, meta)) {
         // The same file was selected twice (e.g. a folder and one of its files).
         return Ok(());
     }
+    if name.len() > MAX_NAME_LEN {
+        bail!(
+            "path is {} bytes, limit is {MAX_NAME_LEN}: {}",
+            name.len(),
+            path.display()
+        );
+    }
+    if out.len() >= MAX_FILES {
+        bail!("too many files (limit {MAX_FILES})");
+    }
     out.push(SourceFile {
         path,
-        name: wire_path(Path::new(&name)),
-        size,
+        name,
+        size: meta.len(),
     });
     Ok(())
 }

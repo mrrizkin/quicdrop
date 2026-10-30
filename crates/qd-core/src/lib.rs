@@ -7,6 +7,7 @@ pub mod approval;
 pub mod cancel;
 pub mod client;
 pub mod discovery;
+pub mod hash;
 pub mod identity;
 pub mod net;
 pub mod progress;

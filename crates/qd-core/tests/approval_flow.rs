@@ -79,14 +79,9 @@ impl Harness {
     async fn send(&self, path: &Path) -> Result<client::Summary> {
         let opts = SendOpts {
             addr: self.addr,
-            device_id: None,
             files: vec![path.to_path_buf()],
             concurrency: 2,
-            quiet: true,
-            name: None,
-            progress: None,
-            file_progress: None,
-            cancel: None,
+            ..SendOpts::default()
         };
         timeout(Duration::from_secs(20), client::send(opts)).await?
     }
@@ -174,14 +169,9 @@ async fn deny_policy_rejects_everything() -> Result<()> {
         Duration::from_secs(20),
         client::send(SendOpts {
             addr: SocketAddr::from(([127, 0, 0, 1], quic_port)),
-            device_id: None,
             files: vec![src],
             concurrency: 1,
-            quiet: true,
-            name: None,
-            progress: None,
-            file_progress: None,
-            cancel: None,
+            ..SendOpts::default()
         }),
     )
     .await?;

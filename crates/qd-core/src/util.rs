@@ -93,13 +93,24 @@ pub fn sanitize_rel_path(name: &str) -> PathBuf {
 
 /// Wire (forward slash) form of a relative path.
 pub fn wire_path(path: &Path) -> String {
-    path.components()
-        .filter_map(|c| match c {
-            std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("/")
+    let mut out = String::new();
+    for component in path.components() {
+        if let std::path::Component::Normal(part) = component {
+            if !out.is_empty() {
+                out.push('/');
+            }
+            push_lossy(&mut out, part);
+        }
+    }
+    out
+}
+
+/// Append an `OsStr`, only allocating when it is not valid UTF-8.
+fn push_lossy(out: &mut String, part: &std::ffi::OsStr) {
+    match part.to_str() {
+        Some(text) => out.push_str(text),
+        None => out.push_str(&part.to_string_lossy()),
+    }
 }
 
 /// Strip any directory component and hostile characters from a peer supplied name.

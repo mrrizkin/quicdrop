@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 
 /// ALPN identifier; bumped when the wire format changes incompatibly.
 pub const ALPN: &[u8] = b"quicdrop/1";
-pub const PROTO_VERSION: u16 = 3;
+/// Bumped when a frame's shape or meaning changes.
+pub const PROTO_VERSION: u16 = 4;
 
 pub const DEFAULT_QUIC_PORT: u16 = 53320;
 pub const DEFAULT_DISCOVERY_PORT: u16 = 53321;
@@ -19,6 +20,11 @@ pub const MULTICAST_GROUP: [u8; 4] = [224, 0, 0, 167];
 pub const CHUNK_SIZE: usize = 512 * 1024;
 /// Upper bound for a single control frame.
 pub const MAX_FRAME: usize = 4 * 1024 * 1024;
+/// Upper bound for an `Offer`, which carries one entry per file.
+pub const MAX_OFFER_FRAME: usize = 16 * 1024 * 1024;
+/// Longest relative path a peer may announce. With [`MAX_OFFER_FRAME`] it bounds
+/// what a single offer can weigh.
+pub const MAX_NAME_LEN: usize = 1024;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct FileMeta {
@@ -135,9 +141,34 @@ pub async fn read_frame(recv: &mut quinn::RecvStream) -> Result<Frame> {
     read_msg(recv).await
 }
 
+/// Reject an offer whose announced paths do not fit the limits both sides enforce.
+pub fn validate_offer(files: &[FileMeta]) -> Result<()> {
+    if files.is_empty() {
+        bail!("offer has no files");
+    }
+    for file in files {
+        if file.name.len() > MAX_NAME_LEN {
+            bail!(
+                "announced path is {} bytes, limit is {MAX_NAME_LEN}",
+                file.name.len()
+            );
+        }
+    }
+    Ok(())
+}
+
 pub async fn write_msg<T: Serialize>(send: &mut quinn::SendStream, msg: &T) -> Result<()> {
+    write_msg_limit(send, msg, MAX_FRAME).await
+}
+
+/// [`write_msg`] with an explicit size limit.
+pub async fn write_msg_limit<T: Serialize>(
+    send: &mut quinn::SendStream,
+    msg: &T,
+    limit: usize,
+) -> Result<()> {
     let body = postcard::to_stdvec(msg).context("serialize frame")?;
-    if body.len() > MAX_FRAME {
+    if body.len() > limit {
         bail!("frame too large: {} bytes", body.len());
     }
     send.write_all(&(body.len() as u32).to_le_bytes())
@@ -148,12 +179,20 @@ pub async fn write_msg<T: Serialize>(send: &mut quinn::SendStream, msg: &T) -> R
 }
 
 pub async fn read_msg<T: for<'de> Deserialize<'de>>(recv: &mut quinn::RecvStream) -> Result<T> {
+    read_msg_limit(recv, MAX_FRAME).await
+}
+
+/// [`read_msg`] with an explicit size limit, checked before the buffer is allocated.
+pub async fn read_msg_limit<T: for<'de> Deserialize<'de>>(
+    recv: &mut quinn::RecvStream,
+    limit: usize,
+) -> Result<T> {
     let mut len_buf = [0u8; 4];
     recv.read_exact(&mut len_buf)
         .await
         .context("read frame length")?;
     let len = u32::from_le_bytes(len_buf) as usize;
-    if len > MAX_FRAME {
+    if len > limit {
         bail!("frame exceeds limit: {len} bytes");
     }
     let mut body = vec![0u8; len];
@@ -188,5 +227,30 @@ mod tests {
         let mut buf = [0u8; 4];
         buf.copy_from_slice(&(u32::MAX).to_le_bytes());
         assert!(u32::from_le_bytes(buf) as usize > MAX_FRAME);
+    }
+
+    #[test]
+    fn offers_have_room_for_the_file_limit() {
+        // Every file in a full offer must have room for a short path.
+        let source = crate::source::MAX_FILES;
+        let per_file = MAX_OFFER_FRAME / source;
+        assert!(per_file >= 160, "only {per_file} bytes per file");
+    }
+
+    #[test]
+    fn long_names_are_rejected() {
+        let ok = FileMeta {
+            id: 1,
+            name: "a".repeat(MAX_NAME_LEN),
+            size: 0,
+            hash: None,
+        };
+        assert!(validate_offer(std::slice::from_ref(&ok)).is_ok());
+        let long = FileMeta {
+            name: "a".repeat(MAX_NAME_LEN + 1),
+            ..ok.clone()
+        };
+        assert!(validate_offer(&[long]).is_err());
+        assert!(validate_offer(&[]).is_err());
     }
 }

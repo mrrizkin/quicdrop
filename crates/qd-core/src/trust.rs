@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::identity::Identity;
 
@@ -36,6 +36,9 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// How stale `last_seen` may get on disk before a transfer rewrites the store.
+pub const TOUCH_SAVE_INTERVAL: Duration = Duration::from_secs(60);
+
 /// Cheap-to-clone handle around the on-disk trust list.
 #[derive(Debug, Clone)]
 pub struct TrustStore {
@@ -62,6 +65,15 @@ impl TrustStore {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Number of trusted devices.
+    pub fn len(&self) -> usize {
+        self.peers.lock().map(|p| p.len()).unwrap_or(0)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     pub fn is_trusted(&self, device_id: &str) -> bool {
@@ -98,23 +110,44 @@ impl TrustStore {
         self.save()
     }
 
-    /// Record an accepted transfer from an already trusted device.
+    /// Record an accepted transfer from an already trusted device. The store is
+    /// written at most once per [`TOUCH_SAVE_INTERVAL`].
     pub fn touch(&self, device_id: &str) {
-        let changed = {
+        let now = now_secs();
+        let stale = {
             let Ok(mut peers) = self.peers.lock() else {
                 return;
             };
             match peers.get_mut(device_id) {
                 Some(peer) => {
-                    peer.last_seen = now_secs();
-                    true
+                    let stale = now.saturating_sub(peer.last_seen) >= TOUCH_SAVE_INTERVAL.as_secs();
+                    peer.last_seen = now;
+                    stale
                 }
                 None => false,
             }
         };
-        if changed {
+        if stale {
             let _ = self.save();
         }
+    }
+
+    /// [`Self::touch`] for callers on the async runtime: saving is blocking file IO.
+    pub async fn touch_async(&self, device_id: &str) {
+        let store = self.clone();
+        let device_id = device_id.to_string();
+        let _ = tokio::task::spawn_blocking(move || store.touch(&device_id)).await;
+    }
+
+    /// [`Self::remember`] for callers on the async runtime.
+    pub async fn remember_async(&self, device_id: &str, name: &str, platform: &str) -> Result<()> {
+        let store = self.clone();
+        let device_id = device_id.to_string();
+        let name = name.to_string();
+        let platform = platform.to_string();
+        tokio::task::spawn_blocking(move || store.remember(&device_id, &name, &platform))
+            .await
+            .context("trust store task")?
     }
 
     /// Remove an exact device id. Returns whether anything was removed.
@@ -247,5 +280,21 @@ mod tests {
         store.remember("aaaa2222", "b", "linux").unwrap();
         assert!(store.forget_prefix("aaaa").is_err());
         assert!(store.is_trusted("aaaa1111"));
+    }
+
+    #[test]
+    fn repeated_touches_do_not_rewrite_the_file() {
+        let (dir, store) = store();
+        store.remember("abc", "laptop", "linux").unwrap();
+        let path = dir.path().join("trusted.json");
+        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        for _ in 0..20 {
+            store.touch("abc");
+        }
+        let after = std::fs::metadata(&path).unwrap().modified().unwrap();
+        assert_eq!(before, after);
+        // The in-memory view still moved.
+        assert!(store.get("abc").unwrap().last_seen > 0);
     }
 }

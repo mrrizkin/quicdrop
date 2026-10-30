@@ -85,7 +85,7 @@ pub async fn start(
     advertise: bool,
 ) -> Result<Discovery> {
     let (tx, rx) = mpsc::unbounded_channel::<Peer>();
-    let local_addrs = local_ipv4_addrs();
+    let local_addrs = local_ipv4_addrs_async().await;
     let primary = local_addrs
         .iter()
         .find(|ip| matches!(ip, IpAddr::V4(v4) if !v4.is_loopback()))
@@ -366,6 +366,8 @@ fn bind_discovery_socket(port: u16, primary: Option<IpAddr>) -> Result<UdpSocket
     #[cfg(all(unix, not(target_os = "linux")))]
     sock.set_reuse_port(true).ok();
     sock.set_broadcast(true).ok();
+    // Beacons arrive in bursts; the default buffer drops them on a busy LAN.
+    sock.set_recv_buffer_size(1024 * 1024).ok();
     sock.bind(&SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)).into())
         .with_context(|| format!("bind udp/{port} for discovery"))?;
 
@@ -381,7 +383,8 @@ fn bind_discovery_socket(port: u16, primary: Option<IpAddr>) -> Result<UdpSocket
     Ok(UdpSocket::from_std(sock.into())?)
 }
 
-/// Local IPv4 addresses, primary first.
+/// Local IPv4 addresses, primary first. Blocks on a hostname lookup, so async callers
+/// use [`local_ipv4_addrs_async`].
 pub fn local_ipv4_addrs() -> Vec<IpAddr> {
     let mut out: Vec<IpAddr> = Vec::new();
     if let Some(ip) = primary_ip() {
@@ -393,6 +396,13 @@ pub fn local_ipv4_addrs() -> Vec<IpAddr> {
         }
     }
     out
+}
+
+/// [`local_ipv4_addrs`] off the async runtime: resolving the hostname can hit DNS.
+pub async fn local_ipv4_addrs_async() -> Vec<IpAddr> {
+    tokio::task::spawn_blocking(local_ipv4_addrs)
+        .await
+        .unwrap_or_default()
 }
 
 fn primary_ip() -> Option<IpAddr> {

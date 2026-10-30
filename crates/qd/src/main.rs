@@ -175,9 +175,7 @@ async fn main() -> Result<()> {
                 concurrency,
                 quiet: cli.quiet,
                 name: cli.name,
-                progress: None,
-                file_progress: None,
-                cancel: None,
+                ..SendOpts::default()
             };
             let summary = qd_core::client::send(summary).await?;
             if summary.failed > 0 {

@@ -1,19 +1,26 @@
 //! Sender side.
 
 use anyhow::{bail, Context, Result};
-use std::net::{Ipv4Addr, SocketAddr};
+use bytes::{Bytes, BytesMut};
+use std::io::{Read, Seek, SeekFrom};
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
-use tokio::sync::Semaphore;
+use tokio::sync::{mpsc, watch, Semaphore};
 use tracing::{debug, info};
 
 use crate::cancel::Cancel;
+use crate::hash;
+use crate::identity::Identity;
 use crate::progress::{throttle_file_sink, FileSink, Progress, ProgressSink};
 use crate::proto::{self, AcceptFile, FileAck, FileHeader, FileMeta, FileTrailer, Frame};
+use crate::source::SourceFile;
 use crate::util::{human_bytes, human_rate};
+
+/// Pieces of one chunk buffered ahead of the wire.
+const READ_AHEAD: usize = 2;
 
 #[derive(Clone)]
 pub struct SendOpts {
@@ -31,6 +38,28 @@ pub struct SendOpts {
     pub file_progress: Option<FileSink>,
     /// Abort the transfer when signalled.
     pub cancel: Option<Cancel>,
+    /// Identity to announce. Read from the config dir when absent.
+    pub identity: Option<Arc<Identity>>,
+    /// Expanded inputs. Walked here when absent.
+    pub sources: Option<Vec<SourceFile>>,
+}
+
+impl Default for SendOpts {
+    fn default() -> Self {
+        Self {
+            addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+            device_id: None,
+            files: Vec::new(),
+            concurrency: 8,
+            quiet: true,
+            name: None,
+            progress: None,
+            file_progress: None,
+            cancel: None,
+            identity: None,
+            sources: None,
+        }
+    }
 }
 
 impl std::fmt::Debug for SendOpts {
@@ -44,6 +73,8 @@ impl std::fmt::Debug for SendOpts {
             .field("progress", &self.progress.is_some())
             .field("file_progress", &self.file_progress.is_some())
             .field("cancel", &self.cancel.is_some())
+            .field("identity", &self.identity.is_some())
+            .field("sources", &self.sources.as_ref().map(Vec::len))
             .finish()
     }
 }
@@ -57,19 +88,31 @@ pub struct Summary {
     pub duration: Duration,
 }
 
+/// Result of the background hash, including the failure case.
+type HashState = std::result::Result<String, String>;
+
 pub async fn send(opts: SendOpts) -> Result<Summary> {
-    if opts.files.is_empty() {
+    if opts.files.is_empty() && opts.sources.is_none() {
         bail!("nothing to send");
     }
 
-    let mut metas = Vec::new();
-    let mut paths: Vec<PathBuf> = Vec::new();
+    let sources = match opts.sources.clone() {
+        Some(sources) => sources,
+        None => {
+            let inputs = opts.files.clone();
+            // Walking a folder can touch thousands of entries: keep it off the runtime.
+            tokio::task::spawn_blocking(move || crate::source::expand(&inputs))
+                .await
+                .context("scan input paths")??
+        }
+    };
+    if sources.is_empty() {
+        bail!("nothing to send");
+    }
+
+    let mut metas = Vec::with_capacity(sources.len());
+    let mut paths: Vec<PathBuf> = Vec::with_capacity(sources.len());
     let mut total = 0u64;
-    // Walking a folder can touch thousands of entries: keep it off the runtime.
-    let inputs = opts.files.clone();
-    let sources = tokio::task::spawn_blocking(move || crate::source::expand(&inputs))
-        .await
-        .context("scan input paths")??;
     for (i, src) in sources.iter().enumerate() {
         total += src.size;
         metas.push(FileMeta {
@@ -80,14 +123,10 @@ pub async fn send(opts: SendOpts) -> Result<Summary> {
         });
         paths.push(src.path.clone());
     }
-    if metas.is_empty() {
-        bail!("nothing to send");
-    }
+    proto::validate_offer(&metas)?;
 
     let client_cfg = crate::net::client_config(opts.device_id.clone())?;
-    let mut endpoint = quinn::Endpoint::client(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)))
-        .context("bind QUIC client socket")?;
-    endpoint.set_default_client_config(client_cfg);
+    let endpoint = crate::net::client_endpoint(client_cfg)?;
 
     let connecting = endpoint
         .connect(opts.addr, "quicdrop.local")
@@ -115,7 +154,16 @@ pub async fn send(opts: SendOpts) -> Result<Summary> {
             conn.close(0u32.into(), b"cancelled");
         })
     });
-    let identity = crate::identity::Identity::load_or_create(opts.name.clone())?;
+    let identity = match &opts.identity {
+        Some(identity) => identity.as_ref().clone(),
+        None => {
+            let name = opts.name.clone();
+            // Reading the key and parsing it is blocking file IO.
+            tokio::task::spawn_blocking(move || Identity::load_or_create(name))
+                .await
+                .context("load identity")??
+        }
+    };
     let (mut ctrl_send, mut ctrl_recv) = conn.open_bi().await.context("open control stream")?;
     proto::write_frame(
         &mut ctrl_send,
@@ -123,7 +171,7 @@ pub async fn send(opts: SendOpts) -> Result<Summary> {
             version: proto::PROTO_VERSION,
             device_id: identity.device_id.clone(),
             name: identity.name.clone(),
-            platform: crate::identity::Identity::platform().to_string(),
+            platform: Identity::platform().to_string(),
         },
     )
     .await?;
@@ -148,12 +196,13 @@ pub async fn send(opts: SendOpts) -> Result<Summary> {
         human_bytes(total)
     );
 
-    proto::write_frame(
+    proto::write_msg_limit(
         &mut ctrl_send,
         &Frame::Offer {
             session,
             files: metas.clone(),
         },
+        proto::MAX_OFFER_FRAME,
     )
     .await?;
     let accepted: Vec<AcceptFile> = match proto::read_msg(&mut ctrl_recv).await? {
@@ -183,11 +232,10 @@ pub async fn send(opts: SendOpts) -> Result<Summary> {
 
     let semaphore = Arc::new(Semaphore::new(opts.concurrency.max(1)));
     let file_progress = opts.file_progress.clone().map(throttle_file_sink);
-    let mut tasks = Vec::new();
+    let mut tasks = Vec::with_capacity(accepted.len());
     for item in accepted {
-        let path = match paths.get(item.id as usize) {
-            Some(p) => p.clone(),
-            None => continue,
+        let Some(path) = paths.get(item.id as usize).cloned() else {
+            continue;
         };
         let meta = metas[item.id as usize].clone();
         let conn = conn.clone();
@@ -281,9 +329,17 @@ async fn send_one(
     file_progress: Option<FileSink>,
 ) -> Result<u64> {
     let started = Instant::now();
-    // Hash once so every chunk carries the same whole-file digest, then let a pool of
-    // workers pull 8 MiB chunks until the remaining range is on the wire.
-    let hash = hash_file(path).await?;
+    // Every chunk carries the same whole-file digest, so the hash is only needed
+    // once the first trailer is written. Start it now and overlap it with the payload.
+    let (hash_tx, hash_rx) = watch::channel::<Option<HashState>>(None);
+    {
+        let path = path.to_path_buf();
+        tokio::spawn(async move {
+            let result = hash::hash_file(&path).await.map_err(|e| format!("{e:#}"));
+            let _ = hash_tx.send(Some(result));
+        });
+    }
+
     let count = proto::chunk_count(offset, meta.size);
     let workers = proto::stream_count(count) as usize;
     let next = Arc::new(AtomicUsize::new(0));
@@ -301,7 +357,7 @@ async fn send_one(
             count,
             next.clone(),
             file_done.clone(),
-            hash.clone(),
+            hash_rx.clone(),
             progress.clone(),
             file_progress.clone(),
         )));
@@ -333,7 +389,7 @@ async fn send_worker(
     count: u16,
     next: Arc<AtomicUsize>,
     file_done: Arc<AtomicU64>,
-    hash: String,
+    hash_rx: watch::Receiver<Option<HashState>>,
     progress: Arc<Progress>,
     file_progress: Option<FileSink>,
 ) -> Result<u64> {
@@ -354,29 +410,13 @@ async fn send_worker(
             len,
             index,
             count,
-            &hash,
+            &hash_rx,
             &progress,
             &file_progress,
             &file_done,
         )
         .await?;
     }
-}
-
-async fn hash_file(path: &Path) -> Result<String> {
-    let mut file = tokio::fs::File::open(path)
-        .await
-        .with_context(|| format!("open {}", path.display()))?;
-    let mut hasher = blake3::Hasher::new();
-    let mut buf = vec![0u8; proto::CHUNK_SIZE];
-    loop {
-        let n = file.read(&mut buf).await.context("read source file")?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Ok(hasher.finalize().to_hex().to_string())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -389,7 +429,7 @@ async fn send_chunk(
     len: u64,
     index: u16,
     count: u16,
-    hash: &str,
+    hash_rx: &watch::Receiver<Option<HashState>>,
     progress: &Progress,
     file_progress: &Option<FileSink>,
     file_done: &AtomicU64,
@@ -408,39 +448,60 @@ async fn send_chunk(
     )
     .await?;
 
-    let mut file = tokio::fs::File::open(path)
-        .await
-        .with_context(|| format!("open {}", path.display()))?;
-    file.seek(std::io::SeekFrom::Start(start)).await?;
+    // One blocking task reads the whole chunk sequentially and hands pieces over.
+    let (tx, mut rx) = mpsc::channel::<std::io::Result<Bytes>>(READ_AHEAD);
+    let reader = {
+        let path = path.to_path_buf();
+        tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            let mut file = std::fs::File::open(&path)?;
+            file.seek(SeekFrom::Start(start))?;
+            let mut left = len;
+            while left > 0 {
+                let want = left.min(proto::CHUNK_SIZE as u64) as usize;
+                let mut buf = BytesMut::zeroed(want);
+                file.read_exact(&mut buf)?;
+                left -= want as u64;
+                // A closed receiver means the chunk is already lost; stop reading.
+                if tx.blocking_send(Ok(buf.freeze())).is_err() {
+                    break;
+                }
+            }
+            Ok(())
+        })
+    };
 
-    let mut remaining = len;
-    let mut buf = vec![0u8; proto::CHUNK_SIZE];
     let mut written = 0u64;
-    while remaining > 0 {
-        let want = remaining.min(buf.len() as u64) as usize;
-        let n = file
-            .read(&mut buf[..want])
-            .await
-            .context("read source file")?;
-        if n == 0 {
-            bail!("{} ended early, {remaining} bytes missing", path.display());
-        }
-        send.write_all(&buf[..n])
-            .await
-            .context("write file chunk")?;
-        remaining -= n as u64;
-        written += n as u64;
-        progress.add(n as u64);
+    while let Some(piece) = rx.recv().await {
+        let piece = piece.with_context(|| format!("read {}", path.display()))?;
+        let n = piece.len() as u64;
+        // Hands the buffer to quinn without copying it.
+        send.write_chunk(piece).await.context("write file chunk")?;
+        written += n;
+        progress.add(n);
         if let Some(sink) = file_progress {
-            let done = file_done.fetch_add(n as u64, Ordering::Relaxed) + n as u64;
+            let done = file_done.fetch_add(n, Ordering::Relaxed) + n;
             sink(meta.id, done, meta.size);
         }
     }
+    match reader.await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => bail!("{}: {e}", path.display()),
+        Err(e) => bail!("source reader: {e}"),
+    }
+    if written != len {
+        bail!(
+            "{} ended early, {} bytes missing",
+            path.display(),
+            len - written
+        );
+    }
+
+    let hash = await_hash(hash_rx).await.map_err(anyhow::Error::msg)?;
     proto::write_msg(
         &mut send,
         &FileTrailer {
             id: meta.id,
-            hash: hash.to_string(),
+            hash: hash.clone(),
         },
     )
     .await?;
@@ -455,6 +516,19 @@ async fn send_chunk(
         bail!("peer computed a different digest");
     }
     Ok(written)
+}
+
+/// Wait for the background hash. Every chunk of a file shares one digest.
+async fn await_hash(rx: &watch::Receiver<Option<HashState>>) -> HashState {
+    let mut rx = rx.clone();
+    loop {
+        if let Some(state) = rx.borrow_and_update().clone() {
+            return state;
+        }
+        if rx.changed().await.is_err() {
+            return Err("hashing stopped before it finished".to_string());
+        }
+    }
 }
 
 fn new_session_id() -> [u8; 16] {

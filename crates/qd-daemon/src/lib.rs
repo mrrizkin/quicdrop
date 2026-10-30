@@ -93,6 +93,15 @@ pub struct FileView {
     pub ok: Option<bool>,
 }
 
+/// Counts reported by `/api/status`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Counts {
+    pub peers: usize,
+    pub trusted: usize,
+    pub approvals: usize,
+    pub active: usize,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct PeerView {
     pub device_id: String,
@@ -236,6 +245,24 @@ impl Inner {
             .unwrap_or_default();
         peers.sort_by(|a, b| a.name.cmp(&b.name));
         peers
+    }
+
+    /// Counts for `/api/status`, taken under the lock so nothing is cloned.
+    pub fn counts(&self) -> Counts {
+        Counts {
+            peers: self.peers.lock().map(|p| p.len()).unwrap_or(0),
+            trusted: self.trust.len(),
+            approvals: self.approvals.lock().map(|a| a.len()).unwrap_or(0),
+            active: self
+                .transfers
+                .lock()
+                .map(|t| {
+                    t.iter()
+                        .filter(|t| t.status == TransferStatus::Active)
+                        .count()
+                })
+                .unwrap_or(0),
+        }
     }
 
     pub fn trusted_peers(&self) -> Vec<qd_core::trust::TrustedPeer> {
@@ -459,7 +486,7 @@ impl Daemon {
         }
 
         let runtime = Arc::new(RuntimeSettings::new(cfg.out_dir.clone(), cfg.policy));
-        let local_addrs = discovery::local_ipv4_addrs();
+        let local_addrs = discovery::local_ipv4_addrs_async().await;
         let (events, _) = broadcast::channel(512);
         let (shutdown, _) = watch::channel(false);
 
@@ -813,7 +840,19 @@ async fn approval_forwarder(
     }
 }
 
-/// Resolve a send target: `ip:port`, a known peer, or a fresh discovery lookup.
+/// Best match for `target` among the peers discovery has already reported.
+fn known_peer(inner: &Arc<Inner>, target: &str, needle: &str) -> Option<PeerView> {
+    let peers: Vec<PeerView> = inner
+        .peers
+        .lock()
+        .map(|p| p.values().cloned().collect())
+        .unwrap_or_default();
+    peers
+        .into_iter()
+        .find(|p| p.device_id.starts_with(target) || p.name.to_lowercase().contains(needle))
+}
+
+/// Resolve a send target: `ip:port`, a known peer, or a discovery lookup.
 pub async fn resolve_target(
     inner: &Arc<Inner>,
     target: &str,
@@ -824,32 +863,31 @@ pub async fn resolve_target(
     }
 
     let needle = target.to_lowercase();
-    let known = {
-        let peers: Vec<PeerView> = inner
-            .peers
-            .lock()
-            .map(|p| p.values().cloned().collect())
-            .unwrap_or_default();
-        peers
-            .into_iter()
-            .find(|p| p.device_id.starts_with(target) || p.name.to_lowercase().contains(&needle))
-    };
-    if let Some(peer) = known {
-        let addr: SocketAddr = peer
-            .addr
-            .parse()
-            .with_context(|| format!("invalid stored address {}", peer.addr))?;
-        return Ok((
-            addr,
-            Some(peer.device_id.clone()),
-            format!(
-                "{} ({})",
-                peer.name,
-                &peer.device_id[..8.min(peer.device_id.len())]
-            ),
-        ));
+    // The running discovery feeds `peers`; wait for it before starting another one.
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if let Some(peer) = known_peer(inner, target, &needle) {
+            let addr: SocketAddr = peer
+                .addr
+                .parse()
+                .with_context(|| format!("invalid stored address {}", peer.addr))?;
+            return Ok((
+                addr,
+                Some(peer.device_id.clone()),
+                format!(
+                    "{} ({})",
+                    peer.name,
+                    &peer.device_id[..8.min(peer.device_id.len())]
+                ),
+            ));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
+    // Last resort: a short-lived lookup for peers the running instance cannot see.
     let mut disc = discovery::start(
         inner.identity.clone(),
         inner.quic_port,
@@ -881,33 +919,47 @@ pub fn file_views(files: &[FileMeta]) -> Vec<FileView> {
 }
 
 /// Helper for the API: start an outbound transfer and return its id.
-pub fn spawn_send(
+pub async fn spawn_send(
     inner: Arc<Inner>,
     to: String,
     paths: Vec<PathBuf>,
     concurrency: usize,
     timeout: Duration,
 ) -> String {
-    // Expand once so the transfer list shows real files, with real sizes.
-    let files: Vec<FileView> = qd_core::source::expand(&paths)
-        .map(|sources| {
-            sources
-                .into_iter()
-                .map(|f| FileView {
-                    name: f.name,
-                    size: f.size,
-                    done: 0,
-                    ok: None,
-                })
-                .collect()
+    // Expand once so the transfer list shows real files, with real sizes. The walk
+    // blocks, so it runs off the runtime and its result is handed to `client::send`.
+    let walk = {
+        let paths = paths.clone();
+        tokio::task::spawn_blocking(move || qd_core::source::expand(&paths)).await
+    };
+    let (sources, walk_error) = match walk {
+        Ok(Ok(sources)) => (sources, None),
+        Ok(Err(e)) => (Vec::new(), Some(format!("{e:#}"))),
+        Err(e) => (Vec::new(), Some(format!("scan task: {e}"))),
+    };
+    let files: Vec<FileView> = sources
+        .iter()
+        .map(|f| FileView {
+            name: f.name.clone(),
+            size: f.size,
+            done: 0,
+            ok: None,
         })
-        .unwrap_or_default();
+        .collect();
     let total: u64 = files.iter().map(|f| f.size).sum();
     let id = inner.start_transfer(Direction::Out, &to, &to, files, total);
 
     let state = inner.clone();
     let transfer_id = id.clone();
     tokio::spawn(async move {
+        if let Some(error) = walk_error {
+            state.finish_transfer(
+                &transfer_id,
+                TransferStatus::Failed,
+                Some(format!("cannot read input: {error}")),
+            );
+            return;
+        }
         let result = resolve_target(&state, &to, timeout).await;
         let (addr, device_id, label) = match result {
             Ok(target) => target,
@@ -947,6 +999,8 @@ pub fn spawn_send(
             progress: Some(progress),
             file_progress: Some(file_progress),
             cancel: Some(cancel.clone()),
+            identity: Some(state.identity.clone()),
+            sources: Some(sources),
         };
         debug!("sending to {label} at {addr}");
         match client::send(opts).await {

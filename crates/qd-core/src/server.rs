@@ -1,23 +1,31 @@
 //! Receiver side: advertise, accept QUIC connections, write files to disk.
 
 use anyhow::{bail, Context, Result};
+use bytes::Bytes;
 use std::collections::HashMap;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::io::{Seek, SeekFrom, Write};
+
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
-use tokio::sync::watch;
+use std::time::Instant;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
 
 use crate::approval::{ApprovalRequest, ApprovalSender, Decision, APPROVAL_TIMEOUT};
 use crate::discovery::{self, Discovery};
+use crate::hash;
 use crate::identity::Identity;
-use crate::progress::{FileThrottle, Progress};
+use crate::progress::Progress;
 use crate::proto::{self, AcceptFile, FileAck, FileHeader, FileMeta, FileTrailer, Frame};
 use crate::trust::TrustStore;
 use crate::util::{human_bytes, human_rate, sanitize_rel_path, unique_path, wire_path};
+
+/// Chunks buffered between the network and the disk writer for one segment.
+const WRITE_AHEAD: usize = 3;
+/// Minimum interval between per-file progress events.
+const FILE_PROGRESS_INTERVAL_MS: u64 = 100;
 
 /// What to do with a transfer from a device that is not in the trust store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -179,17 +187,22 @@ fn emit(opts: &ServerOpts, event: ServerEvent) {
     }
 }
 
-/// Throttle file progress; lifecycle events pass through unchanged.
-fn throttle_events(sink: ServerEventSink) -> ServerEventSink {
-    let throttle = Arc::new(FileThrottle::default());
-    Arc::new(move |event| {
-        if let ServerEvent::FileProgress { id, done, size, .. } = &event {
-            if !throttle.should_emit(*id, *done, *size) {
-                return;
-            }
-        }
-        sink(event);
-    })
+/// Emit per-file progress, at most once per [`FILE_PROGRESS_INTERVAL_MS`]. Deciding
+/// before the event is built keeps the skipped steps free.
+fn emit_file_progress(planned: &PlannedFile, peer_id: &str, done: u64, size: u64) {
+    let Some(sink) = &planned.events else {
+        return;
+    };
+    if !planned.flight.should_emit(done, size) {
+        return;
+    }
+    sink(ServerEvent::FileProgress {
+        peer_id: peer_id.to_string(),
+        id: planned.meta.id,
+        name: planned.label.clone(),
+        done,
+        size,
+    });
 }
 
 impl ServerOpts {
@@ -250,12 +263,7 @@ pub async fn start(opts: ServerOpts) -> Result<RunningServer> {
         .await
         .with_context(|| format!("create output dir {}", opts.out_dir.display()))?;
 
-    let config = crate::net::server_config(&identity)?;
-    let endpoint = quinn::Endpoint::server(
-        config,
-        SocketAddr::from((Ipv4Addr::UNSPECIFIED, opts.quic_port)),
-    )
-    .with_context(|| format!("bind QUIC udp/{}", opts.quic_port))?;
+    let endpoint = crate::net::server_endpoint(&identity, opts.quic_port)?;
     let discovery =
         discovery::start(identity.clone(), opts.quic_port, opts.discovery_port, true).await?;
 
@@ -330,6 +338,8 @@ struct PlannedFile {
     label: String,
     offset: u64,
     flight: Arc<Flight>,
+    /// Event sink for this segment, if the host asked for one.
+    events: Option<ServerEventSink>,
 }
 
 /// (file id, label, bytes, ok, completes the file)
@@ -342,6 +352,9 @@ struct Flight {
     written: AtomicU64,
     expected_hash: Mutex<Option<String>>,
     verdict: watch::Sender<Option<Verdict>>,
+    started: Instant,
+    progress_at_ms: AtomicU64,
+    progress_done: AtomicU64,
 }
 
 #[derive(Clone)]
@@ -359,7 +372,28 @@ impl Flight {
             written: AtomicU64::new(0),
             expected_hash: Mutex::new(None),
             verdict,
+            started: Instant::now(),
+            progress_at_ms: AtomicU64::new(0),
+            progress_done: AtomicU64::new(0),
         }
+    }
+
+    /// Gate for [`ServerEvent::FileProgress`].
+    fn should_emit(&self, done: u64, size: u64) -> bool {
+        let complete = size == 0 || done >= size;
+        if !complete && done <= self.progress_done.load(Ordering::Relaxed) {
+            return false;
+        }
+        let now = self.started.elapsed().as_millis() as u64;
+        if !complete
+            && now.saturating_sub(self.progress_at_ms.load(Ordering::Relaxed))
+                < FILE_PROGRESS_INTERVAL_MS
+        {
+            return false;
+        }
+        self.progress_at_ms.store(now, Ordering::Relaxed);
+        self.progress_done.store(done, Ordering::Relaxed);
+        true
     }
 }
 
@@ -379,11 +413,7 @@ async fn handle_connection(
     identity: Arc<Identity>,
     opts: Arc<ServerOpts>,
 ) -> Result<()> {
-    let opts = {
-        let mut opts = (*opts).clone();
-        opts.events = opts.events.clone().map(throttle_events);
-        Arc::new(opts)
-    };
+    let opts = Arc::new((*opts).clone());
     let (mut ctrl_send, mut ctrl_recv) = conn.accept_bi().await.context("accept control stream")?;
 
     let hello: Frame = proto::read_msg(&mut ctrl_recv).await?;
@@ -422,7 +452,7 @@ async fn handle_connection(
     )
     .await?;
 
-    let offer = proto::read_msg(&mut ctrl_recv).await?;
+    let offer: Frame = proto::read_msg_limit(&mut ctrl_recv, proto::MAX_OFFER_FRAME).await?;
     let (session, files) = match offer {
         Frame::Offer { session, files } => (session, files),
         Frame::Bye => {
@@ -431,16 +461,16 @@ async fn handle_connection(
         }
         other => bail!("expected offer, got {other:?}"),
     };
-    if files.is_empty() {
+    if let Err(e) = proto::validate_offer(&files) {
         let _ = proto::write_frame(
             &mut ctrl_send,
             &Frame::Reject {
                 session,
-                reason: "no files offered".into(),
+                reason: format!("invalid offer: {e}"),
             },
         )
         .await;
-        bail!("empty offer");
+        bail!("invalid offer: {e}");
     }
 
     // Ask before touching the disk: a declined transfer must not create files.
@@ -524,6 +554,7 @@ async fn handle_connection(
             label,
             offset,
             flight: Arc::new(Flight::new(count)),
+            events: opts.events.clone(),
         });
     }
 
@@ -548,6 +579,7 @@ async fn handle_connection(
                         label: p.label.clone(),
                         offset: p.offset,
                         flight: p.flight.clone(),
+                        events: p.events.clone(),
                     }),
                 )
             })
@@ -728,7 +760,7 @@ async fn decide(
     }
 
     if opts.trust.is_trusted(peer_id) {
-        opts.trust.touch(peer_id);
+        opts.trust.touch_async(peer_id).await;
         info!("accepting transfer from trusted device \"{peer_name}\"");
         return Decision::accept();
     }
@@ -755,7 +787,11 @@ async fn decide(
     match tokio::time::timeout(APPROVAL_TIMEOUT, rx).await {
         Ok(Ok(decision)) if decision.is_accept() => {
             if decision.should_remember() {
-                if let Err(e) = opts.trust.remember(peer_id, peer_name, peer_platform) {
+                if let Err(e) = opts
+                    .trust
+                    .remember_async(peer_id, peer_name, peer_platform)
+                    .await
+                {
                     warn!("could not save trust decision for \"{peer_name}\": {e:#}");
                 } else {
                     info!("trusted \"{peer_name}\" ({peer_id})");
@@ -832,50 +868,46 @@ async fn write_segment(
         );
     }
 
-    let mut file = tokio::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(&planned.dest)
-        .await
-        .with_context(|| format!("open {}", planned.dest.display()))?;
-    file.seek(std::io::SeekFrom::Start(start)).await?;
+    // One blocking writer per segment owns the file handle and its offset;
+    // `read_chunk` hands over quinn's buffers without copying.
+    let (tx, rx) = mpsc::channel::<Bytes>(WRITE_AHEAD);
+    let writer = {
+        let dest = planned.dest.clone();
+        tokio::task::spawn_blocking(move || write_to_disk(&dest, start, rx))
+    };
 
     let mut written = 0u64;
-    let mut buf = vec![0u8; proto::CHUNK_SIZE];
     while written < len {
-        let want = ((len - written) as usize).min(buf.len());
-        let n = match recv
-            .read(&mut buf[..want])
+        let want = ((len - written) as usize).min(proto::CHUNK_SIZE);
+        let chunk = match recv
+            .read_chunk(want, true)
             .await
             .context("read file chunk")?
         {
-            Some(n) if n > 0 => n,
+            Some(chunk) if !chunk.bytes.is_empty() => chunk,
             _ => break,
         };
-        file.write_all(&buf[..n])
-            .await
-            .context("write file chunk")?;
-        written += n as u64;
-        progress.add(n as u64);
-        let done = planned
-            .flight
-            .written
-            .fetch_add(n as u64, Ordering::Relaxed)
-            + n as u64;
-        if let Some(sink) = &opts.events {
-            sink(ServerEvent::FileProgress {
-                peer_id: peer_id.to_string(),
-                id: planned.meta.id,
-                name: planned.label.clone(),
-                done: offset + done,
-                size: expected,
-            });
+        let n = chunk.bytes.len() as u64;
+        if tx.send(chunk.bytes).await.is_err() {
+            break;
         }
+        written += n;
+        progress.add(n);
+        let done = planned.flight.written.fetch_add(n, Ordering::Relaxed) + n;
+        emit_file_progress(planned, peer_id, offset + done, expected);
     }
-    file.flush().await?;
-    if written != len {
-        bail!("{} chunk incomplete: {written}/{len}", planned.label);
+    drop(tx);
+
+    let on_disk = match writer.await {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(e)) => bail!("write {}: {e}", planned.dest.display()),
+        Err(e) => bail!("disk writer: {e}"),
+    };
+    if written != len || on_disk != len {
+        bail!(
+            "{} chunk incomplete: {on_disk}/{len} written, {written}/{len} received",
+            planned.label
+        );
     }
     if count > 1 {
         remember_range(&planned.dest, start, len).await;
@@ -938,6 +970,26 @@ fn sidecar_path(dest: &std::path::Path) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// Sequential write of one segment's pieces, on the blocking pool with its own handle.
+fn write_to_disk(
+    dest: &std::path::Path,
+    start: u64,
+    mut rx: mpsc::Receiver<Bytes>,
+) -> std::io::Result<u64> {
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(dest)?;
+    file.seek(SeekFrom::Start(start))?;
+    let mut written = 0u64;
+    while let Some(chunk) = rx.blocking_recv() {
+        file.write_all(&chunk)?;
+        written += chunk.len() as u64;
+    }
+    Ok(written)
+}
+
 /// Contiguous prefix proven by the ranges recorded next to a split partial file.
 async fn trusted_prefix(dest: &std::path::Path, len: u64) -> u64 {
     if len <= proto::CHUNK_STREAM_BYTES {
@@ -998,7 +1050,7 @@ async fn verify_file(planned: &PlannedFile, expected: u64) -> Verdict {
             .ok()
             .and_then(|slot| slot.clone())
     });
-    match hash_path(&planned.dest).await {
+    match hash::hash_file_with_size(&planned.dest).await {
         Ok((size, hash)) => {
             if size != expected {
                 Verdict {
@@ -1026,22 +1078,6 @@ async fn verify_file(planned: &PlannedFile, expected: u64) -> Verdict {
             message: format!("cannot verify: {e:#}"),
         },
     }
-}
-
-async fn hash_path(path: &std::path::Path) -> Result<(u64, String)> {
-    let mut file = tokio::fs::File::open(path).await?;
-    let mut hasher = blake3::Hasher::new();
-    let mut size = 0u64;
-    let mut buf = vec![0u8; 1024 * 1024];
-    loop {
-        let n = file.read(&mut buf).await?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-        size += n as u64;
-    }
-    Ok((size, hasher.finalize().to_hex().to_string()))
 }
 
 #[cfg(test)]

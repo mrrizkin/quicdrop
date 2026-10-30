@@ -17,6 +17,7 @@ use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{Stream, StreamExt};
 use tracing::warn;
@@ -137,11 +138,7 @@ async fn status(State(inner): State<Arc<Inner>>) -> Json<Value> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let transfers = inner.transfers(200);
-    let active = transfers
-        .iter()
-        .filter(|t| t.status == TransferStatus::Active)
-        .count();
+    let counts = inner.counts();
     Json(json!({
         "name": inner.identity.name,
         "device_id": inner.identity.device_id,
@@ -156,10 +153,10 @@ async fn status(State(inner): State<Arc<Inner>>) -> Json<Value> {
         "out_dir": inner.runtime.out_dir(),
         "policy": inner.runtime.policy(),
         "uptime_secs": now.saturating_sub(inner.started_at),
-        "peers": inner.peers().len(),
-        "trusted": inner.trusted_peers().len(),
-        "pending_approvals": inner.pending_approvals().len(),
-        "active_transfers": active,
+        "peers": counts.peers,
+        "trusted": counts.trusted,
+        "pending_approvals": counts.approvals,
+        "active_transfers": counts.active,
         "event_subscribers": inner.event_capacity(),
     }))
 }
@@ -286,7 +283,8 @@ async fn send(
         body.paths,
         concurrency,
         Duration::from_secs(body.timeout_secs.unwrap_or(5).max(1)),
-    );
+    )
+    .await;
     Ok(Json(json!({ "id": id })))
 }
 
@@ -349,10 +347,8 @@ async fn shutdown(State(inner): State<Arc<Inner>>) -> Json<Value> {
     Json(json!({ "ok": true }))
 }
 
-async fn events(
-    State(inner): State<Arc<Inner>>,
-) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
-    let hello = DaemonEvent::Hello {
+fn hello_event(inner: &Arc<Inner>) -> DaemonEvent {
+    DaemonEvent::Hello {
         name: inner.identity.name.clone(),
         device_id: inner.identity.device_id.clone(),
         peers: inner.peers(),
@@ -362,15 +358,22 @@ async fn events(
             .into_iter()
             .filter(|t| t.status == TransferStatus::Active)
             .collect(),
-    };
-    let first = tokio_stream::once(Ok::<_, Infallible>(sse(&hello)));
+    }
+}
+
+async fn events(
+    State(inner): State<Arc<Inner>>,
+) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
+    let first = tokio_stream::once(Ok::<_, Infallible>(sse(&hello_event(&inner))));
 
     let rx = inner.subscribe();
-    let rest = BroadcastStream::new(rx).filter_map(|item| match item {
+    let snapshot = inner.clone();
+    let rest = BroadcastStream::new(rx).filter_map(move |item| match item {
         Ok(event) => Some(Ok(sse(&event))),
-        Err(e) => {
-            warn!("event stream lagged: {e}");
-            None
+        // Progress is disposable, a session or approval is not: resend a snapshot.
+        Err(BroadcastStreamRecvError::Lagged(n)) => {
+            warn!("event stream lagged by {n}, resending a snapshot");
+            Some(Ok(sse(&hello_event(&snapshot))))
         }
     });
 

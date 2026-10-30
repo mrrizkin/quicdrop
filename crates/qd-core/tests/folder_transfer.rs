@@ -54,14 +54,9 @@ impl Harness {
     async fn send_paths(&self, paths: Vec<PathBuf>) -> Result<client::Summary> {
         let opts = SendOpts {
             addr: self.addr,
-            device_id: None,
             files: paths,
             concurrency: 2,
-            quiet: true,
-            name: None,
-            progress: None,
-            file_progress: None,
-            cancel: None,
+            ..SendOpts::default()
         };
         timeout(Duration::from_secs(20), client::send(opts)).await?
     }
