@@ -26,6 +26,19 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: check version
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if ! printf '%s' "$tag" | grep -Eq '^v[0-9]{4}\.[0-9]{2}\.[0-9]+$'; then
+            echo "tag $tag is not v<YEAR>.<WEEK>.<PATCH>" >&2
+            exit 1
+          fi
+          if [ "$tag" != "v$version" ]; then
+            echo "tag $tag does not match Cargo.toml version $version" >&2
+            exit 1
+          fi
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: add macos targets
@@ -73,6 +86,20 @@ jobs:
         working-directory: apps/desktop
     steps:
       - uses: actions/checkout@v4
+      - name: check version
+        shell: bash
+        working-directory: .
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if ! printf '%s' "$tag" | grep -Eq '^v[0-9]{4}\.[0-9]{2}\.[0-9]+$'; then
+            echo "tag $tag is not v<YEAR>.<WEEK>.<PATCH>" >&2
+            exit 1
+          fi
+          if [ "$tag" != "v$version" ]; then
+            echo "tag $tag does not match Cargo.toml version $version" >&2
+            exit 1
+          fi
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:

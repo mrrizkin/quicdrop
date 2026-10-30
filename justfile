@@ -22,6 +22,14 @@ test:
 
 verify: fmt-check lint test
 
+# Next release tag for the current UTC ISO week.
+next-version:
+    ./scripts/next-version.sh
+
+# Stamp that version, commit it and tag it.
+tag:
+    ./scripts/next-version.sh --create
+
 build:
     cargo build --release
 

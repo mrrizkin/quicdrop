@@ -24,3 +24,4 @@ just desktop   # run the Tauri app
 - Docs and comments state what is true now: no status, roadmap, or change history.
 - Commit no build output, keys, `.env`, or local state.
 - Never `pkill -f` a pattern that matches the invoking shell.
+- Version tags are `v<YEAR>.<ISO week>.<patch>` in UTC, cut with `just tag`.

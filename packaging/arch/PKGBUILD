@@ -1,6 +1,6 @@
 # Maintainer: quicdrop contributors
 pkgname=quicdrop
-pkgver=0.1.0
+pkgver=2026.44.0
 pkgrel=1
 pkgdesc="Peer-to-peer file transfer over QUIC"
 arch=('x86_64' 'aarch64')
