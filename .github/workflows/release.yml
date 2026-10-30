@@ -48,27 +48,27 @@ jobs:
         shell: bash
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          out="dist/quicdrop-${version}-${{ matrix.name }}"
+          out="dist"
           mkdir -p "$out"
           if [ "$RUNNER_OS" = "macOS" ]; then
             for target in aarch64-apple-darwin x86_64-apple-darwin; do
               cargo build --release --locked -p qd -p qd-daemon --target "$target"
             done
             for bin in qd quicdropd; do
-              lipo -create -output "$out/$bin" \
+              lipo -create -output "$staging/$bin" \
                 "target/aarch64-apple-darwin/release/$bin" \
                 "target/x86_64-apple-darwin/release/$bin"
             done
-            cp LICENSE-MIT README.md "$out/"
+            cp LICENSE-MIT README.md "$staging/"
           elif [ "$RUNNER_OS" = "Windows" ]; then
             cargo build --release --locked
-            cp target/release/qd.exe target/release/quicdropd.exe LICENSE-MIT README.md "$out/"
+            cp target/release/qd.exe target/release/quicdropd.exe LICENSE-MIT README.md "$staging/"
           else
             cargo build --release --locked
-            cp target/release/qd target/release/quicdropd LICENSE-MIT README.md "$out/"
+            cp target/release/qd target/release/quicdropd LICENSE-MIT README.md "$staging/"
           fi
-          tar -C dist -czf "dist/quicdrop-${version}-${{ matrix.name }}.tar.gz" \
-            "quicdrop-${version}-${{ matrix.name }}"
+          tar -C dist -czf "dist/$out.tar.gz" "$out"
+          rm -rf "$staging"
       - uses: actions/upload-artifact@v4
         with:
           name: cli-${{ matrix.name }}
@@ -145,8 +145,7 @@ jobs:
       - name: collect
         shell: bash
         run: |
-          version=$(sed -n 's/^version = "\(.*\)"/\1/p' ../../Cargo.toml | head -1)
-          out="dist/quicdrop-${version}-${{ matrix.name }}"
+          out="dist"
           mkdir -p "$out"
           if [ "$RUNNER_OS" = "macOS" ]; then
             base=target/universal-apple-darwin/release/bundle
@@ -158,7 +157,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-${{ matrix.name }}
-          path: dist/*
+          path: apps/desktop/dist/*
           if-no-files-found: error
 
   arch:
@@ -175,8 +174,8 @@ jobs:
       - name: collect
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          mkdir -p dist/quicdrop-${version}-arch-x86_64
-          cp packaging/arch/*.pkg.tar.zst dist/quicdrop-${version}-arch-x86_64/
+          mkdir -p dist
+          cp packaging/arch/*.pkg.tar.zst dist/
       - uses: actions/upload-artifact@v4
         with:
           name: arch-x86_64
