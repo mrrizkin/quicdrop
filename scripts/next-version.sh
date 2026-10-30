@@ -27,6 +27,12 @@ stamp() {
 	sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"$number\"/" apps/desktop/tauri.conf.json
 	cargo metadata --format-version 1 >/dev/null
 	cargo metadata --format-version 1 --manifest-path apps/desktop/Cargo.toml >/dev/null
+
+	# Packaging pins the tag and the release version too.
+	sed -i "s/^pkgver=.*/pkgver=$number/" packaging/arch/PKGBUILD
+	sed -i "s/^        tag: .*/        tag: $version/" packaging/flatpak/dev.quicdrop.desktop.yml
+	sed -i "s|<release version=\"[^\"]*\" date=\"[^\"]*\"/>|<release version=\"$number\" date=\"$(date -u +%Y-%m-%d)\"/>|" \
+		packaging/linux/dev.quicdrop.desktop.metainfo.xml
 }
 
 case "${1:-}" in
@@ -45,7 +51,9 @@ case "${1:-}" in
 	stamp
 	if [ -n "$(git status --porcelain)" ]; then
 		git add Cargo.toml Cargo.lock apps/desktop/Cargo.toml apps/desktop/Cargo.lock \
-			apps/desktop/tauri.conf.json
+			apps/desktop/tauri.conf.json packaging/arch/PKGBUILD \
+			packaging/flatpak/dev.quicdrop.desktop.yml \
+			packaging/linux/dev.quicdrop.desktop.metainfo.xml
 		git commit -q -m "chore: release $number"
 	fi
 	git tag -a "$version" -m "$version"
