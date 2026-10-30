@@ -146,7 +146,7 @@ jobs:
         shell: bash
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' ../../Cargo.toml | head -1)
-          out="../dist/quicdrop-${version}-${{ matrix.name }}"
+          out="dist/quicdrop-${version}-${{ matrix.name }}"
           mkdir -p "$out"
           if [ "$RUNNER_OS" = "macOS" ]; then
             base=target/universal-apple-darwin/release/bundle
