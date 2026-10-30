@@ -1,3 +1,4 @@
 /target
+/apps/desktop/target
 *.pem
 .env

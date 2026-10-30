@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>QuicDrop</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div class="drop-overlay" id="drop-overlay">
+      <div class="drop-card">
+        <div class="drop-icon">⇣</div>
+        <h2>Drop to send</h2>
+        <p id="drop-target">Select a device first</p>
+      </div>
+    </div>
+
+    <header class="topbar">
+      <div class="brand">
+        <div class="logo">Q</div>
+        <div>
+          <h1>QuicDrop</h1>
+          <p class="tagline">direct transfer over QUIC</p>
+        </div>
+      </div>
+      <div class="device" id="device">
+        <span class="dot" id="device-dot"></span>
+        <div>
+          <div class="device-name" id="device-name">starting…</div>
+          <div class="device-id" id="device-id"></div>
+        </div>
+      </div>
+      <button class="ghost" id="btn-settings" title="Settings">⚙</button>
+    </header>
+
+    <main class="layout">
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Nearby devices</h2>
+          <span class="badge" id="peer-count">0</span>
+        </div>
+        <p class="hint" id="peers-hint">Looking for devices on your network…</p>
+        <ul class="peer-list" id="peer-list"></ul>
+
+        <div class="divider"></div>
+        <div class="panel-head">
+          <h2>Trusted devices</h2>
+          <span class="badge" id="trust-count">0</span>
+        </div>
+        <p class="hint">These can send to you without asking.</p>
+        <ul class="trust-list" id="trust-list"></ul>
+      </section>
+
+      <section class="panel grow">
+        <div class="panel-head">
+          <h2>Transfers</h2>
+          <button class="ghost small" id="btn-send">Send files…</button>
+        </div>
+        <ul class="transfer-list" id="transfer-list">
+          <li class="empty">Nothing transferred yet.</li>
+        </ul>
+      </section>
+    </main>
+
+    <div class="modal-backdrop" id="approval-modal" hidden>
+      <div class="modal approval">
+        <div class="approval-head">
+          <div class="avatar" id="approval-avatar">?</div>
+          <div>
+            <h2 id="approval-title">Incoming transfer</h2>
+            <p class="hint" id="approval-sub">wants to send files</p>
+          </div>
+        </div>
+        <ul class="file-list" id="approval-files"></ul>
+        <div class="approval-actions">
+          <button class="danger" id="approval-decline">Decline</button>
+          <button class="secondary" id="approval-accept">Accept once</button>
+          <button class="primary" id="approval-always">Always accept</button>
+        </div>
+        <p class="modal-foot">Ignoring this request rejects it automatically.</p>
+      </div>
+    </div>
+
+    <div class="modal-backdrop" id="settings-modal" hidden>
+      <div class="modal">
+        <h2>Settings</h2>
+        <label class="field">
+          <span>Save incoming files to</span>
+          <div class="row">
+            <input id="settings-out" type="text" spellcheck="false" />
+            <button class="secondary" id="settings-browse">Browse…</button>
+          </div>
+        </label>
+        <label class="field">
+          <span>New devices</span>
+          <select id="settings-policy">
+            <option value="ask">Ask me every time</option>
+            <option value="auto">Accept automatically</option>
+            <option value="deny">Reject automatically</option>
+          </select>
+        </label>
+        <div class="row end">
+          <button class="ghost" id="settings-cancel">Cancel</button>
+          <button class="primary" id="settings-save">Save</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="toast" id="toast" hidden></div>
+
+    <script src="app.js"></script>
+  </body>
+</html>

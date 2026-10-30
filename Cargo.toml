@@ -1,5 +1,6 @@
 [workspace]
 members = ["crates/qd-core", "crates/qd", "crates/qd-daemon"]
+exclude = ["apps/desktop"]
 resolver = "2"
 
 [workspace.package]

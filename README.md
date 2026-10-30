@@ -17,7 +17,10 @@ connecting to laptop (4d915ba1) at 192.168.1.42:53320
 sent 2 / 2 files in 0.4s (20.4 MiB/s)
 ```
 
-Status: **desktop MVP, working end to end.** Mobile is intentionally out of scope for now.
+Status: **desktop app, working end to end** — CLI, daemon with a local API, and a Tauri
+window. Mobile is intentionally out of scope for now.
+
+![QuicDrop desktop](docs/screenshot.png)
 
 ## Why QUIC
 
@@ -59,6 +62,8 @@ Needs a Rust toolchain (1.82+). Linux, macOS, Windows.
 qd receive [--out DIR]        # advertise + accept transfers
 qd peers [--timeout 4s]       # who is on this network
 qd send <FILES...> --to PEER  # send files
+qd trust                      # list devices allowed to send without asking
+qd trust rm <ID-PREFIX>       # forget a device
 qd id                         # print this device's name / id / config dir
 ```
 
@@ -72,8 +77,72 @@ Global flags: `--port` (QUIC, default `53320`), `--discovery-port` (default `533
 Sending options: `-j/--concurrency` (parallel file streams, default 4),
 `--timeout` (how long to wait for the peer to appear, default `5s`).
 
+Receiving options: `--policy ask|auto|deny` for devices that are not trusted yet (default
+`ask`; on a terminal it prints the sender and file list). Without a terminal an `ask`
+receiver fails closed and tells the sender why.
+
 State lives in `~/.config/quicdrop` (override with `QD_CONFIG_DIR`): `identity.key`,
-`identity.crt`, `name.txt`. Delete the directory to become a new device.
+`identity.crt`, `name.txt`, `trusted.json`, and `daemon.json` while the daemon runs. Delete
+the directory to become a new device.
+
+## Approval and trust
+
+Every offer is checked against `trusted.json` before a byte touches the disk:
+
+* trusted device → accepted silently (and `last_seen` refreshed);
+* unknown device → `--policy` decides: `ask` (prompt / GUI dialog), `auto`, or `deny`;
+* prompt timeouts (120 s) and missing approval channels reject with a reason the sender can
+  display, rather than hanging or silently dropping.
+
+Answering **Always accept** in the prompt or the app writes the device to the trust store.
+The store is plain JSON keyed by certificate fingerprint, so wiping a device's identity
+invalidates its trust automatically.
+
+## Daemon (`quicdropd`)
+
+The GUI does not reimplement transfer logic; it embeds the daemon. `quicdropd` is the same
+thing as a standalone process:
+
+```bash
+quicdropd                          # API on 127.0.0.1:53319, QUIC on 53320
+quicdropd --policy auto --out ~/Inbox
+```
+
+On startup it writes `daemon.json` (mode 0600) with `{pid, addr, token}`. Every request needs
+`Authorization: Bearer <token>` (the event stream also accepts `?token=`, because browsers'
+`EventSource` cannot set headers). Binding is loopback-only by default and a non-loopback
+bind logs a warning.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/status` | identity, ports, out dir, policy, counters |
+| `GET /api/peers` | discovered peers with trust state |
+| `GET /api/transfers?limit=N` | in-memory history (in/out, bytes, status) |
+| `GET /api/approvals` | pending incoming offers |
+| `POST /api/approvals/{id}` | `{accept, remember}` |
+| `GET/POST /api/trust`, `DELETE /api/trust/{id}` | trust store |
+| `POST /api/send` | `{to, paths, concurrency?}` → transfer id |
+| `GET/PATCH /api/config` | `{out_dir, policy}` (applied live) |
+| `GET /api/events` | SSE stream: peer, session, progress, approval, trust, config |
+| `POST /api/shutdown` | stop the daemon |
+
+## Desktop app
+
+```bash
+cd apps/desktop
+cargo run          # development build
+cargo build --release
+```
+
+It is a Tauri v2 window with no bundler and no npm: `ui/` is plain HTML/CSS/JS, loaded from
+disk in dev and embedded in release builds. The Rust side starts the daemon in-process,
+forwards its event stream to the webview as Tauri events, and proxies API calls through an
+`api` command so the bearer token never enters the webview and there is no CORS surface.
+Incoming offers appear as a modal; the transfer list updates live from SSE; drag & drop sends
+to the selected device.
+
+Linux needs the usual Tauri deps (`webkit2gtk-4.1`, `gtk+-3.0`, `libsoup-3.0`,
+`javascriptcoregtk-4.1`).
 
 ## Architecture
 
@@ -86,8 +155,12 @@ crates/
     net.rs          QUIC endpoints, TLS 1.3, certificate pinning verifier
     client.rs       sender
     server.rs       receiver
-    progress.rs     byte counter + live meter
+    progress.rs     byte counter + live meter, optional progress sink
+    trust.rs        trusted.json: remember/forget/list by device id
+    approval.rs     request/decision channel + default TTY prompt
   qd/               clap CLI
+  qd-daemon/        local JSON/SSE API, history, event fan-out (quicdropd)
+apps/desktop/       Tauri v2 shell: in-process daemon + static web UI
 ```
 
 ### Discovery
@@ -135,6 +208,8 @@ No PKI, no pairing codes. Identity is the certificate:
 3. The sender builds a `rustls` verifier that pins that exact fingerprint
    (`net.rs::PinnedVerifier`) — a peer that announces id `4d915ba1` but presents a different
    certificate is rejected during the handshake, before any file is offered.
+4. The receiver gates every offer on the trust store / approval policy before creating any
+   file, so a declined transfer leaves nothing behind.
 
 Transport is TLS 1.3 with ALPN. Incoming file names are sanitized (`util::sanitize_file_name`)
 so a sender cannot write outside the destination directory, and existing files are never
@@ -145,15 +220,15 @@ cryptographic proof (the sender does not present a client certificate yet). See 
 
 ## Roadmap
 
-- [ ] Receiver approval prompt (`--ask`) with a per-transfer allow/deny, plus a trust store
-      so known devices skip it.
+- [x] Receiver approval prompt with a per-transfer allow/deny and a trust store.
+- [x] Long-lived daemon (`quicdropd`) with a local JSON/SSE API.
+- [x] Tauri v2 desktop shell.
 - [ ] Mutual authentication: sender signs a session nonce with its identity key, receiver
       pins it too.
 - [ ] Directory transfer (recursive walk, preserve relative paths).
 - [ ] Persisted session tickets → 0-RTT on reconnect.
 - [ ] Clipboard/text transfer.
-- [ ] Long-lived daemon (`quicdropd`) with a local JSON API for a GUI.
-- [ ] Tauri v2 shell (desktop first, then Android/iOS).
+- [ ] Android/iOS frontends on the same core.
 - [ ] Benchmark harness comparing against LocalSend on real Wi-Fi.
 - [ ] Fallback to TCP+TLS when UDP is blocked.
 
