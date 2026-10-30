@@ -12,8 +12,6 @@ $ qd send photos --to laptop
 sent 2 / 2 files in 0.4s (20.4 MiB/s)
 ```
 
-![quicdrop](docs/screenshot.png)
-
 ## Why QUIC
 
 One stream per file removes the request queue and TCP head-of-line blocking that per-file
