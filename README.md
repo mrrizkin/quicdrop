@@ -68,9 +68,10 @@ length-prefixed postcard frames on the control stream:
 | `Complete` | receiver → sender | bytes written |
 | `Error` / `Bye` | either | terminal |
 
-Each file is its own bidirectional stream: `FileHeader{session,id,offset,size}`, payload,
-`FileTrailer{hash}`, then `FileAck{ok,hash,message}`. The digest follows the payload, so the
-sender hashes while streaming. Peer discovery uses mDNS and a UDP beacon in parallel.
+Each file gets one or more bidirectional streams (above 16 MiB it is split across up to 4):
+`FileHeader{session,id,offset,size,index,count}`, payload, `FileTrailer{hash,index}`, then
+`FileAck{ok,hash,message}` carrying the whole-file verdict once every segment is in. Peer
+discovery uses mDNS and a UDP beacon in parallel.
 
 ## Security
 

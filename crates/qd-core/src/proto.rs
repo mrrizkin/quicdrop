@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 /// ALPN identifier; bumped when the wire format changes incompatibly.
 pub const ALPN: &[u8] = b"quicdrop/1";
-pub const PROTO_VERSION: u16 = 1;
+pub const PROTO_VERSION: u16 = 2;
 
 pub const DEFAULT_QUIC_PORT: u16 = 53320;
 pub const DEFAULT_DISCOVERY_PORT: u16 = 53321;
@@ -68,20 +68,56 @@ pub enum Frame {
     Bye,
 }
 
+/// Files larger than this are spread over several streams.
+pub const SPLIT_MIN_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Upper bound on streams per file. The transport allows far more; this keeps one
+/// large transfer from starving the other files.
+pub const MAX_SEGMENTS: u16 = 4;
+
+/// Number of streams a remaining byte range should use.
+pub fn segment_count(remaining: u64) -> u16 {
+    if remaining <= SPLIT_MIN_BYTES {
+        return 1;
+    }
+    remaining.div_ceil(SPLIT_MIN_BYTES).min(MAX_SEGMENTS as u64) as u16
+}
+
+/// Byte range carried by `index` when a file is split into `count` streams.
+///
+/// Both sides derive ranges from this function, so the receiver can reject a
+/// header whose offset or length does not match its own calculation.
+pub fn segment_range(offset: u64, size: u64, count: u16, index: u16) -> (u64, u64) {
+    let remaining = size.saturating_sub(offset);
+    let count = count.max(1) as u64;
+    let index = index as u64;
+    let base = remaining / count;
+    let extra = remaining % count;
+    let start = offset + base * index + extra.min(index);
+    let len = base + u64::from(index < extra);
+    (start, len)
+}
+
 /// Header written at the beginning of every file stream.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct FileHeader {
     pub session: [u8; 16],
     pub id: u32,
+    /// Start of this segment; equals the resume offset for `index == 0`.
     pub offset: u64,
+    /// Whole file size, not the segment length.
     pub size: u64,
+    pub index: u16,
+    pub count: u16,
 }
 
-/// Written after the payload of a file stream.
+/// Written after the payload of a file stream. `hash` covers the whole file, so
+/// every segment carries the same value.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct FileTrailer {
     pub id: u32,
     pub hash: String,
+    pub index: u16,
 }
 
 /// Verdict sent back on the same stream once the receiver finished writing.

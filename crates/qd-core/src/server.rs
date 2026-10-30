@@ -4,8 +4,10 @@ use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
 
@@ -297,6 +299,49 @@ struct PlannedFile {
     /// Safe relative name shown to the user and in events.
     label: String,
     offset: u64,
+    flight: Arc<Flight>,
+}
+
+/// (file id, label, bytes, ok, completes the file)
+type SegmentOutcome = (u32, String, u64, bool, bool);
+
+/// Segments of one file share this: how many are still writing, how many bytes have
+/// arrived, and the single verdict every segment must report.
+struct Flight {
+    remaining: AtomicU16,
+    written: AtomicU64,
+    expected_hash: Mutex<Option<String>>,
+    verdict: watch::Sender<Option<Verdict>>,
+}
+
+#[derive(Clone)]
+struct Verdict {
+    ok: bool,
+    hash: String,
+    message: String,
+}
+
+impl Flight {
+    fn new(count: u16) -> Self {
+        let (verdict, _) = watch::channel(None);
+        Self {
+            remaining: AtomicU16::new(count.max(1)),
+            written: AtomicU64::new(0),
+            expected_hash: Mutex::new(None),
+            verdict,
+        }
+    }
+}
+
+/// Account for a segment that will never complete, so the others stop waiting.
+fn fail_flight(planned: &PlannedFile, message: String) {
+    if planned.flight.remaining.fetch_sub(1, Ordering::SeqCst) == 1 {
+        let _ = planned.flight.verdict.send(Some(Verdict {
+            ok: false,
+            hash: String::new(),
+            message,
+        }));
+    }
 }
 
 async fn handle_connection(
@@ -429,16 +474,21 @@ async fn handle_connection(
             }
             None => (unique_path(&parent, &file_name), 0),
         };
+        // A split transfer may leave holes when it is interrupted; only resume from
+        // the contiguous prefix the receiver can prove it wrote.
+        let offset = trusted_prefix(&dest, offset).await;
         total += meta.size.saturating_sub(offset);
         accepted.push(AcceptFile {
             id: meta.id,
             offset,
         });
+        let count = proto::segment_count(meta.size.saturating_sub(offset));
         plan.push(PlannedFile {
             meta,
             dest,
             label,
             offset,
+            flight: Arc::new(Flight::new(count)),
         });
     }
 
@@ -462,6 +512,7 @@ async fn handle_connection(
                         dest: p.dest.clone(),
                         label: p.label.clone(),
                         offset: p.offset,
+                        flight: p.flight.clone(),
                     }),
                 )
             })
@@ -514,13 +565,16 @@ async fn handle_connection(
     let mut finished = 0usize;
     let mut transferred = 0u64;
     let mut failures = 0usize;
-    let mut set: JoinSet<Result<(u32, String, u64, bool)>> = JoinSet::new();
+    let mut set: JoinSet<Result<SegmentOutcome>> = JoinSet::new();
 
     loop {
         tokio::select! {
             joined = set.join_next(), if !set.is_empty() && finished < expected => {
                 match joined {
-                    Some(Ok(Ok((id, name, bytes, ok)))) => {
+                    Some(Ok(Ok((id, name, bytes, ok, complete)))) => {
+                        if !complete {
+                            continue;
+                        }
                         finished += 1;
                         transferred += bytes;
                         if !ok { failures += 1; }
@@ -561,7 +615,7 @@ async fn handle_connection(
                         let task_opts = (*opts).clone();
                         let peer_id = sender_id.clone();
                         set.spawn(async move {
-                            receive_file(send, recv, index, progress, task_opts, peer_id).await
+                            receive_segment(send, recv, index, progress, task_opts, peer_id).await
                         });
                     }
                     Err(e) => {
@@ -689,78 +743,73 @@ async fn same_partial(dir: &std::path::Path, name: &str, size: u64) -> Result<Op
     }
 }
 
-async fn receive_file(
+async fn receive_segment(
     mut send: quinn::SendStream,
     mut recv: quinn::RecvStream,
     index: Arc<HashMap<u32, Arc<PlannedFile>>>,
     progress: Arc<Progress>,
     opts: ServerOpts,
     peer_id: String,
-) -> Result<(u32, String, u64, bool)> {
+) -> Result<SegmentOutcome> {
     let header: FileHeader = proto::read_msg(&mut recv)
         .await
         .context("read file header")?;
     let planned = index.get(&header.id).context("unknown file id")?.clone();
+
+    let outcome = write_segment(
+        &mut send, recv, &planned, &header, progress, &opts, &peer_id,
+    )
+    .await;
+    match outcome {
+        Ok(value) => Ok(value),
+        Err(e) => {
+            fail_flight(&planned, format!("{e:#}"));
+            Err(e)
+        }
+    }
+}
+
+async fn write_segment(
+    send: &mut quinn::SendStream,
+    mut recv: quinn::RecvStream,
+    planned: &PlannedFile,
+    header: &FileHeader,
+    progress: Arc<Progress>,
+    opts: &ServerOpts,
+    peer_id: &str,
+) -> Result<SegmentOutcome> {
     let expected = planned.meta.size;
     let offset = planned.offset.min(expected);
-    let file_id = planned.meta.id;
-    let file_progress = opts.events.as_ref().map(|sink| {
-        let sink = sink.clone();
-        let peer = peer_id.clone();
-        let name = planned.label.clone();
-        Progress::with_sink(
-            expected.saturating_sub(offset),
-            Arc::new(move |done, _| {
-                sink(ServerEvent::FileProgress {
-                    peer_id: peer.clone(),
-                    id: file_id,
-                    name: name.clone(),
-                    done: offset + done,
-                    size: expected,
-                })
-            }),
-        )
-    });
+    let count = proto::segment_count(expected.saturating_sub(offset));
+    if header.size != expected || header.count != count || header.index >= count {
+        bail!(
+            "segment {}/{} does not match the accepted plan ({count} expected)",
+            header.index,
+            header.count
+        );
+    }
+    let (start, len) = proto::segment_range(offset, expected, count, header.index);
+    if header.offset != start {
+        bail!(
+            "segment {} starts at {} instead of {start}",
+            header.index,
+            header.offset
+        );
+    }
 
     let mut file = tokio::fs::OpenOptions::new()
         .create(true)
         .write(true)
-        .read(true)
         .truncate(false)
         .open(&planned.dest)
         .await
         .with_context(|| format!("open {}", planned.dest.display()))?;
-
-    // Hash the existing prefix so resume produces the same digest as a one-shot transfer.
-    let mut hasher = blake3::Hasher::new();
-    if offset > 0 {
-        file.set_len(offset).await?;
-        let mut prefix = vec![0u8; 1024 * 1024];
-        let mut read = 0u64;
-        file.seek(std::io::SeekFrom::Start(0)).await?;
-        while read < offset {
-            let want = ((offset - read) as usize).min(prefix.len());
-            let n = file.read(&mut prefix[..want]).await?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&prefix[..n]);
-            read += n as u64;
-        }
-        if read != offset {
-            // Disk changed under us; restart from scratch.
-            file.set_len(0).await?;
-            hasher = blake3::Hasher::new();
-        }
-    }
-    file.set_len(offset).await?;
-    file.seek(std::io::SeekFrom::Start(offset)).await?;
+    file.seek(std::io::SeekFrom::Start(start)).await?;
 
     let mut written = 0u64;
-    let remaining = expected.saturating_sub(offset);
     let mut buf = vec![0u8; proto::CHUNK_SIZE];
-    while written < remaining {
-        let want = ((remaining - written) as usize).min(buf.len());
+    while written < len {
+        let want = ((len - written) as usize).min(buf.len());
         let n = match recv
             .read(&mut buf[..want])
             .await
@@ -772,72 +821,242 @@ async fn receive_file(
         file.write_all(&buf[..n])
             .await
             .context("write file chunk")?;
-        hasher.update(&buf[..n]);
         written += n as u64;
         progress.add(n as u64);
-        if let Some(file_progress) = &file_progress {
-            file_progress.add(n as u64);
+        let done = planned
+            .flight
+            .written
+            .fetch_add(n as u64, Ordering::Relaxed)
+            + n as u64;
+        if let Some(sink) = &opts.events {
+            sink(ServerEvent::FileProgress {
+                peer_id: peer_id.to_string(),
+                id: planned.meta.id,
+                name: planned.label.clone(),
+                done: offset + done,
+                size: expected,
+            });
         }
     }
     file.flush().await?;
-    let hash = hasher.finalize().to_hex().to_string();
+    if written != len {
+        bail!("{} segment incomplete: {written}/{len}", planned.label);
+    }
+    if count > 1 {
+        remember_range(&planned.dest, start, len).await;
+    }
 
-    let complete = written == remaining;
-    let trailer: Option<FileTrailer> = match proto::read_msg(&mut recv).await {
-        Ok(t) => Some(t),
-        Err(e) => {
-            debug!("missing trailer: {e}");
-            None
+    if let Ok(trailer) = proto::read_msg::<FileTrailer>(&mut recv).await {
+        if let Ok(mut slot) = planned.flight.expected_hash.lock() {
+            slot.get_or_insert(trailer.hash);
+        }
+    }
+
+    let left = planned.flight.remaining.fetch_sub(1, Ordering::SeqCst);
+    if left == 1 {
+        let verdict = verify_file(planned, expected).await;
+        if !verdict.ok {
+            error!("{}: {}", planned.dest.display(), verdict.message);
+        }
+        let _ = planned.flight.verdict.send(Some(verdict.clone()));
+        if verdict.ok {
+            let _ = tokio::fs::remove_file(sidecar_path(&planned.dest)).await;
+        }
+        send_ack(send, planned.meta.id, &verdict).await;
+        if let Some(sink) = &opts.events {
+            sink(ServerEvent::File {
+                peer_id: peer_id.to_string(),
+                id: planned.meta.id,
+                name: planned.label.clone(),
+                bytes: expected.saturating_sub(offset),
+                ok: verdict.ok,
+            });
+        }
+        return Ok((
+            planned.meta.id,
+            planned.label.clone(),
+            expected.saturating_sub(offset),
+            verdict.ok,
+            true,
+        ));
+    }
+
+    // The segment that completes the file publishes the verdict for all of them.
+    let mut rx = planned.flight.verdict.subscribe();
+    let verdict = loop {
+        if let Some(verdict) = rx.borrow_and_update().clone() {
+            break verdict;
+        }
+        if rx.changed().await.is_err() {
+            break Verdict {
+                ok: false,
+                hash: String::new(),
+                message: "file aborted".into(),
+            };
         }
     };
-    let expected_hash = planned
-        .meta
-        .hash
-        .clone()
-        .or_else(|| trailer.as_ref().map(|t| t.hash.clone()));
-    let hash_ok = complete && expected_hash.as_deref() == Some(hash.as_str());
-    let ack = if !complete {
-        FileAck {
-            id: planned.meta.id,
-            ok: false,
-            hash,
-            message: format!("incomplete: {written}/{remaining}"),
-        }
-    } else if !hash_ok {
-        FileAck {
-            id: planned.meta.id,
-            ok: false,
-            hash,
-            message: "checksum mismatch".into(),
-        }
-    } else {
-        FileAck {
-            id: planned.meta.id,
-            ok: true,
-            hash,
-            message: String::new(),
-        }
+    send_ack(send, planned.meta.id, &verdict).await;
+    Ok((planned.meta.id, planned.label.clone(), 0, verdict.ok, false))
+}
+
+fn sidecar_path(dest: &std::path::Path) -> PathBuf {
+    let mut name = dest.as_os_str().to_os_string();
+    name.push(".qdp");
+    PathBuf::from(name)
+}
+
+/// Contiguous prefix proven by the ranges recorded next to a split partial file.
+async fn trusted_prefix(dest: &std::path::Path, len: u64) -> u64 {
+    if len <= proto::SPLIT_MIN_BYTES {
+        return len;
+    }
+    let Ok(text) = tokio::fs::read_to_string(sidecar_path(dest)).await else {
+        return 0;
     };
-    let ok = ack.ok;
-    if !ok {
-        error!(
-            "{} rejected: {} (expected {:?} got {})",
-            planned.dest.display(),
-            ack.message,
-            expected_hash,
-            ack.hash
-        );
+    let mut ranges: Vec<(u64, u64)> = text
+        .lines()
+        .filter_map(|line| {
+            let (start, len) = line.split_once(' ')?;
+            Some((start.parse().ok()?, len.parse().ok()?))
+        })
+        .collect();
+    ranges.sort_unstable();
+    let mut cursor = 0u64;
+    for (start, len) in ranges {
+        if start > cursor {
+            break;
+        }
+        cursor = cursor.max(start.saturating_add(len));
     }
-    if let Some(sink) = &opts.events {
-        sink(ServerEvent::FileProgress {
-            peer_id: peer_id.clone(),
-            id: file_id,
-            name: planned.label.clone(),
-            done: if ok { expected } else { offset + written },
-            size: expected,
-        });
+    cursor.min(len)
+}
+
+async fn remember_range(dest: &std::path::Path, start: u64, len: u64) {
+    use tokio::io::AsyncWriteExt as _;
+    let path = sidecar_path(dest);
+    if let Ok(mut file) = tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .await
+    {
+        let _ = file.write_all(format!("{start} {len}\n").as_bytes()).await;
+        let _ = file.flush().await;
     }
-    proto::write_msg(&mut send, &ack).await.ok();
+}
+
+async fn send_ack(send: &mut quinn::SendStream, id: u32, verdict: &Verdict) {
+    let ack = FileAck {
+        id,
+        ok: verdict.ok,
+        hash: verdict.hash.clone(),
+        message: verdict.message.clone(),
+    };
+    let _ = proto::write_msg(send, &ack).await;
     let _ = send.finish();
-    Ok((file_id, planned.label.clone(), written, ok))
+}
+
+async fn verify_file(planned: &PlannedFile, expected: u64) -> Verdict {
+    let wanted = planned.meta.hash.clone().or_else(|| {
+        planned
+            .flight
+            .expected_hash
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone())
+    });
+    match hash_path(&planned.dest).await {
+        Ok((size, hash)) => {
+            if size != expected {
+                Verdict {
+                    ok: false,
+                    hash,
+                    message: format!("size {size} != {expected}"),
+                }
+            } else if wanted.as_deref() != Some(hash.as_str()) {
+                Verdict {
+                    ok: false,
+                    hash,
+                    message: "checksum mismatch".into(),
+                }
+            } else {
+                Verdict {
+                    ok: true,
+                    hash,
+                    message: String::new(),
+                }
+            }
+        }
+        Err(e) => Verdict {
+            ok: false,
+            hash: String::new(),
+            message: format!("cannot verify: {e:#}"),
+        },
+    }
+}
+
+async fn hash_path(path: &std::path::Path) -> Result<(u64, String)> {
+    let mut file = tokio::fs::File::open(path).await?;
+    let mut hasher = blake3::Hasher::new();
+    let mut size = 0u64;
+    let mut buf = vec![0u8; 1024 * 1024];
+    loop {
+        let n = file.read(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        size += n as u64;
+    }
+    Ok((size, hasher.finalize().to_hex().to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn small_partials_are_trusted_as_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("small.bin");
+        std::fs::write(&dest, vec![0u8; 1024]).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        assert_eq!(runtime.block_on(trusted_prefix(&dest, 1024)), 1024);
+    }
+
+    #[test]
+    fn split_partials_resume_from_the_proven_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("big.bin");
+        let len = proto::SPLIT_MIN_BYTES * 2;
+        std::fs::write(&dest, b"").unwrap();
+        let big = proto::SPLIT_MIN_BYTES;
+        std::fs::write(
+            sidecar_path(&dest),
+            format!("0 {big}\n{big} {big}\n{} 5\n", len),
+        )
+        .unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        assert_eq!(runtime.block_on(trusted_prefix(&dest, len)), big * 2);
+    }
+
+    #[test]
+    fn holes_are_not_trusted() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("big.bin");
+        let big = proto::SPLIT_MIN_BYTES;
+        std::fs::write(&dest, b"").unwrap();
+        std::fs::write(sidecar_path(&dest), format!("{big} {big}\n")).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        assert_eq!(runtime.block_on(trusted_prefix(&dest, big * 2)), 0);
+    }
 }

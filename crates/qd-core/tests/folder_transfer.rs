@@ -138,12 +138,14 @@ async fn crafted_traversal_names_stay_inside_out_dir() -> Result<()> {
                 id,
                 offset: 0,
                 size: payload.len() as u64,
+                index: 0,
+                count: 1,
             },
         )
         .await?;
         send.write_all(payload).await?;
         let hash = blake3::hash(payload).to_hex().to_string();
-        proto::write_msg(&mut send, &FileTrailer { id, hash }).await?;
+        proto::write_msg(&mut send, &FileTrailer { id, hash, index: 0 }).await?;
         send.finish()?;
         let ack: proto::FileAck = proto::read_msg(&mut recv).await?;
         assert!(ack.ok, "{}", ack.message);

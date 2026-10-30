@@ -5,7 +5,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::Semaphore;
 use tracing::{debug, info};
 
@@ -279,52 +279,123 @@ async fn send_one(
     file_progress: Option<FileSink>,
 ) -> Result<u64> {
     let started = Instant::now();
-    let (mut send, mut recv) = conn.open_bi().await.context("open file stream")?;
-    proto::write_msg(
-        &mut send,
-        &FileHeader {
-            session,
-            id: meta.id,
-            offset,
-            size: meta.size,
-        },
-    )
-    .await?;
+    // Hash first so every segment can carry the same whole-file digest, then send the
+    // remaining range over up to MAX_SEGMENTS parallel streams.
+    let hash = hash_file(path).await?;
+    let remaining = meta.size.saturating_sub(offset);
+    let count = proto::segment_count(remaining);
 
+    let mut tasks = Vec::with_capacity(count as usize);
+    for index in 0..count {
+        let (start, len) = proto::segment_range(offset, meta.size, count, index);
+        tasks.push(tokio::spawn(send_segment(
+            conn.clone(),
+            session,
+            path.to_path_buf(),
+            meta.clone(),
+            start,
+            len,
+            index,
+            count,
+            hash.clone(),
+            progress.clone(),
+            file_progress.clone(),
+        )));
+    }
+
+    let mut sent = 0u64;
+    let mut failure: Option<String> = None;
+    for task in tasks {
+        match task.await {
+            Ok(Ok(bytes)) => sent += bytes,
+            Ok(Err(e)) => failure = failure.or_else(|| Some(format!("{e:#}"))),
+            Err(e) => failure = failure.or_else(|| Some(format!("segment task: {e}"))),
+        }
+    }
+    if let Some(message) = failure {
+        bail!("{message}");
+    }
+    debug!("{} sent in {:?}", meta.name, started.elapsed());
+    Ok(sent)
+}
+
+async fn hash_file(path: &Path) -> Result<String> {
     let mut file = tokio::fs::File::open(path)
         .await
         .with_context(|| format!("open {}", path.display()))?;
-    // One sequential pass: hash everything (needed for resume correctness) but only put
-    // bytes past `offset` on the wire.
     let mut hasher = blake3::Hasher::new();
     let mut buf = vec![0u8; proto::CHUNK_SIZE];
-    let mut pos = 0u64;
-    let mut sent = 0u64;
     loop {
         let n = file.read(&mut buf).await.context("read source file")?;
         if n == 0 {
             break;
         }
         hasher.update(&buf[..n]);
-        let chunk_end = pos + n as u64;
-        if chunk_end > offset {
-            let skip = offset.saturating_sub(pos) as usize;
-            let slice = &buf[skip..n];
-            send.write_all(slice).await.context("write file chunk")?;
-            sent += slice.len() as u64;
-            progress.add(slice.len() as u64);
-            if let Some(sink) = &file_progress {
-                sink(meta.id, pos + n as u64, meta.size);
-            }
-        }
-        pos = chunk_end;
     }
-    let hash = hasher.finalize().to_hex().to_string();
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn send_segment(
+    conn: quinn::Connection,
+    session: [u8; 16],
+    path: PathBuf,
+    meta: FileMeta,
+    start: u64,
+    len: u64,
+    index: u16,
+    count: u16,
+    hash: String,
+    progress: Arc<Progress>,
+    file_progress: Option<FileSink>,
+) -> Result<u64> {
+    let (mut send, mut recv) = conn.open_bi().await.context("open file stream")?;
+    proto::write_msg(
+        &mut send,
+        &FileHeader {
+            session,
+            id: meta.id,
+            offset: start,
+            size: meta.size,
+            index,
+            count,
+        },
+    )
+    .await?;
+
+    let mut file = tokio::fs::File::open(&path)
+        .await
+        .with_context(|| format!("open {}", path.display()))?;
+    file.seek(std::io::SeekFrom::Start(start)).await?;
+
+    let mut remaining = len;
+    let mut buf = vec![0u8; proto::CHUNK_SIZE];
+    let mut sent = 0u64;
+    while remaining > 0 {
+        let want = remaining.min(buf.len() as u64) as usize;
+        let n = file
+            .read(&mut buf[..want])
+            .await
+            .context("read source file")?;
+        if n == 0 {
+            bail!("{} ended early, {remaining} bytes missing", path.display());
+        }
+        send.write_all(&buf[..n])
+            .await
+            .context("write file chunk")?;
+        remaining -= n as u64;
+        sent += n as u64;
+        progress.add(n as u64);
+        if let Some(sink) = &file_progress {
+            sink(meta.id, start + sent, meta.size);
+        }
+    }
     proto::write_msg(
         &mut send,
         &FileTrailer {
             id: meta.id,
             hash: hash.clone(),
+            index,
         },
     )
     .await?;
@@ -337,7 +408,6 @@ async fn send_one(
     if ack.hash != hash {
         bail!("peer computed a different digest");
     }
-    debug!("{} sent in {:?}", meta.name, started.elapsed());
     Ok(sent)
 }
 
