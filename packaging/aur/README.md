@@ -37,6 +37,11 @@ updpkgsums                      # rewrites sha256sums from the sources
 makepkg --printsrcinfo > .SRCINFO
 ```
 
+`quicdrop-bin` pulls two assets: `quicdrop-<version>-linux-x86_64.tar.gz` for the
+CLI, and `quicdrop-desktop-<version>-amd64.deb` for the desktop binary and its
+icons. Both file names appear in `source=()`, so check them against the release
+page before trusting `updpkgsums` — it fails to download, not to notice a rename.
+
 The `quicdrop` archive checksum comes from
 `https://github.com/<owner>/quicdrop/archive/v<pkgver>.tar.gz`. GitHub has
 regenerated these archives before; if the sum stops matching, re-run `updpkgsums`

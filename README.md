@@ -25,8 +25,19 @@ cargo build --release
 ./target/release/qd --help
 ```
 
-Rust 1.82+. Linux, macOS, Windows. Prebuilt packages for each platform are on the
-[releases page](https://github.com/mrrizkin/quicdrop/releases).
+Rust 1.82+. Linux, macOS, Windows.
+
+Prebuilt, from the [releases page](https://github.com/mrrizkin/quicdrop/releases):
+
+| Asset | Contains |
+| --- | --- |
+| `quicdrop-<version>-{linux-x86_64,windows-x86_64,macos-universal}.tar.gz` | `qd` and `quicdropd`, no GUI |
+| `quicdrop-desktop-<version>-{amd64.deb,x86_64.rpm,amd64.AppImage}` | desktop app, plus `qd` and `quicdropd` in `/usr/bin` |
+| `quicdrop-desktop-<version>-x64-setup.exe`, `-universal.dmg` | desktop app only; use the tarball for `qd` |
+| `quicdrop-<version>.flatpak` | desktop app, plus `qd` and `quicdropd` |
+
+Arch and derivatives: `quicdrop-bin` (prebuilt) or `quicdrop` (built from source),
+both from the AUR.
 
 ## Usage
 

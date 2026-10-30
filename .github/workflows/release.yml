@@ -135,21 +135,15 @@ jobs:
       - name: build windows
         if: runner.os == 'Windows'
         shell: bash
-        run: |
-          # MSI caps ProductVersion at 255 per field, so the CalVer tag is folded
-          # into 0.<yy>.<week><patch> for that bundle only.
-          version=$(sed -n 's/^version = "\(.*\)"/\1/p' ../../Cargo.toml | head -1)
-          IFS=. read -r year week patch <<< "$version"
-          msi="0.$((10#$year % 100)).$((10#$week * 100 + 10#$patch))"
-          cargo tauri build --bundles nsis
-          cargo tauri build --bundles msi --config "{\"version\":\"$msi\"}"
+        run: cargo tauri build --bundles nsis
       - name: build macos
         if: runner.os == 'macOS'
         run: cargo tauri build --target universal-apple-darwin --bundles app,dmg
       - name: collect
         shell: bash
         run: |
-          out="dist"
+          out="$PWD/dist"
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' ../../Cargo.toml | head -1)
           mkdir -p "$out"
           if [ "$RUNNER_OS" = "macOS" ]; then
             base=target/universal-apple-darwin/release/bundle
@@ -157,7 +151,17 @@ jobs:
             base=target/release/bundle
           fi
           find "$base" -type f \( -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' \
-            -o -name '*.msi' -o -name '*.exe' -o -name '*.dmg' \) -exec cp {} "$out/" \;
+            -o -name '*.exe' -o -name '*.dmg' \) -exec cp {} "$out/" \;
+          # Tauri names each bundle after its own convention; publish one scheme.
+          for file in "$out"/*; do
+            case "$(basename "$file")" in
+              *.deb)       mv "$file" "$out/quicdrop-desktop-$version-amd64.deb" ;;
+              *.rpm)       mv "$file" "$out/quicdrop-desktop-$version-x86_64.rpm" ;;
+              *.AppImage)  mv "$file" "$out/quicdrop-desktop-$version-amd64.AppImage" ;;
+              *.dmg)       mv "$file" "$out/quicdrop-desktop-$version-universal.dmg" ;;
+              *-setup.exe) mv "$file" "$out/quicdrop-desktop-$version-x64-setup.exe" ;;
+            esac
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-${{ matrix.name }}
@@ -175,16 +179,8 @@ jobs:
           useradd -m builder
           chown -R builder .
           su builder -c "cd packaging/arch && makepkg -s --noconfirm"
-      - name: collect
-        run: |
-          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          mkdir -p dist
-          cp packaging/arch/*.pkg.tar.zst dist/
-      - uses: actions/upload-artifact@v4
-        with:
-          name: arch-x86_64
-          path: dist/*
-          if-no-files-found: error
+      # The Arch recipe is also published as an AUR package; this job only proves it
+      # still builds against the tag, so the bundle is not attached to the release.
 
   publish:
     needs: [cli, desktop, arch]
@@ -194,6 +190,29 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - name: check the published set
+        run: |
+          # This job only downloads artifacts, so the version comes from the tag.
+          version="${GITHUB_REF_NAME#v}"
+          cd dist
+          # A missing bundle used to surface as an absent download, not a failed build.
+          for expected in \
+            "quicdrop-$version-linux-x86_64.tar.gz" \
+            "quicdrop-$version-windows-x86_64.tar.gz" \
+            "quicdrop-$version-macos-universal.tar.gz" \
+            "quicdrop-desktop-$version-amd64.deb" \
+            "quicdrop-desktop-$version-x86_64.rpm" \
+            "quicdrop-desktop-$version-amd64.AppImage" \
+            "quicdrop-desktop-$version-x64-setup.exe" \
+            "quicdrop-desktop-$version-universal.dmg" \
+            "quicdrop-$version.flatpak"
+          do
+            if [ ! -f "$expected" ]; then
+              echo "missing release asset: $expected" >&2
+              ls -l >&2
+              exit 1
+            fi
+          done
       - name: checksums
         run: |
           cd dist
