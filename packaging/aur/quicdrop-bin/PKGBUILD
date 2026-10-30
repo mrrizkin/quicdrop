@@ -1,0 +1,45 @@
+# Maintainer: quicdrop contributors
+
+pkgname=quicdrop-bin
+_pkgname=quicdrop
+pkgver=2026.44.9
+pkgrel=1
+pkgdesc="Peer-to-peer file transfer over QUIC on the local network, prebuilt"
+arch=('x86_64')
+url="https://github.com/mrrizkin/quicdrop"
+license=('MIT')
+depends=('glibc' 'gcc-libs' 'gtk3' 'webkit2gtk-4.1' 'libsoup3' 'hicolor-icon-theme')
+provides=('quicdrop')
+conflicts=('quicdrop' 'quicdrop-git')
+options=('!strip' '!debug')
+makedepends=('libarchive')
+source=(
+  "$_pkgname-$pkgver-x86_64.tar.gz::$url/releases/download/v$pkgver/quicdrop-$pkgver-linux-x86_64.tar.gz"
+  "QuicDrop_${pkgver}_amd64.deb::$url/releases/download/v$pkgver/QuicDrop_${pkgver}_amd64.deb"
+)
+sha256sums=(
+  'b83b74f1001257ff6fe1dcef381b5bf2ca5a59790e2156a8805c7653634b9393'
+  'dc6fa7cdb4aa01d149e2b0595b1a282c259a91e3f0f0de1202fd0db7137c55f0'
+)
+
+prepare() {
+  mkdir -p desktop
+  bsdtar -xf "QuicDrop_${pkgver}_amd64.deb" -C desktop
+  ( cd desktop && bsdtar -xf data.tar.gz && rm -f data.tar.gz control.tar.gz debian-binary )
+}
+
+package() {
+  install -Dm755 "$srcdir/quicdrop-$pkgver-linux-x86_64/qd" "$pkgdir/usr/bin/qd"
+  install -Dm755 "$srcdir/quicdrop-$pkgver-linux-x86_64/quicdropd" "$pkgdir/usr/bin/quicdropd"
+  install -Dm755 "$srcdir/desktop/usr/bin/quicdrop-desktop" "$pkgdir/usr/bin/quicdrop-desktop"
+
+  install -Dm644 "$srcdir/desktop/usr/share/applications/QuicDrop.desktop" \
+    "$pkgdir/usr/share/applications/QuicDrop.desktop"
+  for size in 32x32 128x128 256x256@2; do
+    install -Dm644 "$srcdir/desktop/usr/share/icons/hicolor/$size/apps/quicdrop-desktop.png" \
+      "$pkgdir/usr/share/icons/hicolor/$size/apps/quicdrop-desktop.png"
+  done
+
+  install -Dm644 "$srcdir/quicdrop-$pkgver-linux-x86_64/LICENSE-MIT" \
+    "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
