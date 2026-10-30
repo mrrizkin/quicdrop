@@ -17,6 +17,8 @@ sha256sums=('a5df7c9b1968484a94ea438679c2f78b090aa7ce0d724eb6f8e22b42cab7c38f')
 
 build() {
   cd "$pkgname-$pkgver"
+  # Panic locations embed the directory a crate was compiled in.
+  export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$srcdir=/build"
   cargo build --release --locked
   cargo build --release --locked --manifest-path apps/desktop/Cargo.toml
 }
