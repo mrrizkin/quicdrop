@@ -397,6 +397,32 @@ function filesKey(transfer) {
   return `${(transfer.files || []).length}|${state.fileQuery}|${expandedFiles.has(transfer.id) ? "all" : "part"}`;
 }
 
+/* Peers and trust change on every beacon; rebuild their lists at most once a frame. */
+let peersRenderQueued = false;
+let trustRenderQueued = false;
+
+function schedulePeers() {
+  if (peersRenderQueued) return;
+  peersRenderQueued = true;
+  const run = () => {
+    peersRenderQueued = false;
+    renderPeers();
+  };
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(run);
+  else setTimeout(run, 32);
+}
+
+function scheduleTrust() {
+  if (trustRenderQueued) return;
+  trustRenderQueued = true;
+  const run = () => {
+    trustRenderQueued = false;
+    renderTrust();
+  };
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(run);
+  else setTimeout(run, 32);
+}
+
 function scheduleTransfers() {
   if (transfersRenderQueued) return;
   transfersRenderQueued = true;
@@ -897,7 +923,7 @@ async function handleEvent(payload) {
       break;
     case "peer":
       upsertPeer(payload.peer);
-      renderPeers();
+      schedulePeers();
       break;
     case "session": {
       const before = state.transfers.find((t) => t.id === payload.transfer.id);
@@ -936,7 +962,9 @@ async function handleEvent(payload) {
       break;
     case "trust":
       state.trust = payload.peers || [];
-      renderAll();
+      applyTrust();
+      schedulePeers();
+      scheduleTrust();
       break;
     case "config":
       state.config = { out_dir: payload.out_dir, policy: payload.policy };
@@ -979,6 +1007,12 @@ async function setupDragDrop() {
     toast(`Daemon unavailable: ${error}`);
   }
   await listen("daemon-event", (event) => handleEvent(event.payload));
+  // Progress and per-file events arrive in batches to keep one IPC message per tick.
+  await listen("daemon-batch", (event) => {
+    (event.payload || []).forEach((item) => handleEvent(item));
+  });
+  // The shell dropped events it could not keep up with; pull a whole snapshot.
+  await listen("daemon-resync", () => refresh());
   await refresh();
   setupDragDrop();
   // Cheap safety net in case an event was missed while the window was hidden.

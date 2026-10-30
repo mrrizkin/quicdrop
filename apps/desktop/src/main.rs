@@ -4,10 +4,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use qd_core::server::Policy;
-use qd_daemon::{Daemon, DaemonConfig};
+use qd_daemon::{Daemon, DaemonConfig, DaemonEvent};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
+use std::time::Duration;
 use tauri::Emitter;
 use tauri_plugin_dialog::DialogExt;
 
@@ -113,11 +114,16 @@ async fn open_path(path: String) -> Result<(), String> {
     } else {
         "xdg-open"
     };
-    std::process::Command::new(opener)
-        .arg(&path)
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| format!("cannot open {path}: {e}"))
+    // Forking is blocking work; keep it off the runtime.
+    tokio::task::spawn_blocking(move || {
+        std::process::Command::new(opener)
+            .arg(&path)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("cannot open {path}: {e}"))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -145,6 +151,28 @@ async fn pick_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
     Ok(path
         .and_then(|p| p.into_path().ok())
         .map(|p| p.display().to_string()))
+}
+
+/// Events that arrive in bursts and are delivered to the webview a few at a time.
+fn is_burst(event: &DaemonEvent) -> bool {
+    matches!(
+        event,
+        DaemonEvent::Progress { .. } | DaemonEvent::File { .. }
+    )
+}
+
+fn flush(handle: &tauri::AppHandle, pending: &mut Vec<DaemonEvent>) {
+    match pending.len() {
+        0 => {}
+        1 => {
+            let _ = handle.emit("daemon-event", &pending[0]);
+            pending.clear();
+        }
+        _ => {
+            let batch = std::mem::take(pending);
+            let _ = handle.emit("daemon-batch", &batch);
+        }
+    }
 }
 
 fn main() {
@@ -182,20 +210,34 @@ fn main() {
             http: reqwest::Client::new(),
         })
         .setup(move |app| {
-            // Forward daemon events to the webview.
+            // Forward daemon events to the webview. Progress and per-file events are
+            // coalesced per tick; each one is a serialize plus an IPC round trip.
             let handle = app.handle().clone();
-            let events = setup_daemon.state().subscribe();
+            let mut events = setup_daemon.state().subscribe();
             tauri::async_runtime::spawn(async move {
-                let mut events = events;
+                let mut pending: Vec<DaemonEvent> = Vec::new();
+                let mut tick = tokio::time::interval(Duration::from_millis(100));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 loop {
-                    match events.recv().await {
-                        Ok(event) => {
-                            let _ = handle.emit("daemon-event", &event);
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                            eprintln!("event stream lagged by {n}");
-                        }
-                        Err(_) => break,
+                    tokio::select! {
+                        received = events.recv() => match received {
+                            Ok(event) => {
+                                if is_burst(&event) {
+                                    pending.push(event);
+                                } else {
+                                    flush(&handle, &mut pending);
+                                    let _ = handle.emit("daemon-event", &event);
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                // A dropped session or approval leaves the window stale.
+                                eprintln!("event stream lagged by {n}, asking the ui to resync");
+                                pending.clear();
+                                let _ = handle.emit("daemon-resync", ());
+                            }
+                            Err(_) => break,
+                        },
+                        _ = tick.tick() => flush(&handle, &mut pending),
                     }
                 }
             });
