@@ -27,7 +27,8 @@ cargo build --release
 ./target/release/qd --help
 ```
 
-Rust 1.82+. Linux, macOS, Windows.
+Rust 1.82+. Linux, macOS, Windows. Prebuilt packages for each platform are on the
+[releases page](https://github.com/mrrizkin/quicdrop/releases).
 
 ## Usage
 
@@ -55,25 +56,6 @@ cargo run --manifest-path apps/desktop/Cargo.toml
 
 It embeds the daemon (`quicdropd`, loopback API on 53319) and serves a static `ui/`.
 Linux needs `webkit2gtk-4.1`, `gtk+-3.0`, `libsoup-3.0`, `javascriptcoregtk-4.1`.
-
-## Packages
-
-Install the Tauri CLI once: `cargo install tauri-cli --version "^2" --locked`.
-
-| Target | Artifact | Command |
-| --- | --- | --- |
-| Debian, Ubuntu | `.deb` | `cargo tauri build --bundles deb` (in `apps/desktop`) |
-| Fedora, RHEL | `.rpm` | `cargo tauri build --bundles rpm` |
-| Any Linux | `.AppImage` | `cargo tauri build --bundles appimage` |
-| Arch Linux | `.pkg.tar.zst` | `cd packaging/arch && makepkg -s` |
-| Flatpak | `.flatpak` | `flatpak-builder` with `packaging/flatpak/dev.quicdrop.desktop.yml` |
-| Windows | `.msi`, `-setup.exe` | `cargo tauri build --bundles msi,nsis` |
-| macOS | `.dmg`, `.app` | `cargo tauri build --target universal-apple-darwin` |
-| CLI only | `qd`, `quicdropd` | `cargo build --release` |
-
-Pushing a `v*` tag builds all of these in `.github/workflows/release.yml` and attaches them
-to the GitHub release. Builds are unsigned: macOS needs Open from the context menu the first
-time, Windows shows SmartScreen until a certificate is configured.
 
 ## Protocol
 
