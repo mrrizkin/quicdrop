@@ -1,0 +1,20 @@
+[package]
+name = "qd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "QUIC Drop CLI - fast file transfer over your local network"
+
+[[bin]]
+name = "qd"
+path = "src/main.rs"
+
+[dependencies]
+qd-core = { path = "../qd-core" }
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap = { version = "4.6.7", features = ["derive"] }
+humantime = "2.4.0"
+dirs = "7.0.0"
