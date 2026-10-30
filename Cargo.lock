@@ -1109,7 +1109,7 @@ dependencies = [
 
 [[package]]
 name = "qd"
-version = "2026.44.2"
+version = "2026.44.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -1123,7 +1123,7 @@ dependencies = [
 
 [[package]]
 name = "qd-core"
-version = "2026.44.2"
+version = "2026.44.3"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1146,7 +1146,7 @@ dependencies = [
 
 [[package]]
 name = "qd-daemon"
-version = "2026.44.2"
+version = "2026.44.3"
 dependencies = [
  "anyhow",
  "axum",
