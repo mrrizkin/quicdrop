@@ -69,7 +69,7 @@ jobs:
           fi
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           rm -rf "dist/$name"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: cli-${{ matrix.name }}
           path: dist/*
@@ -162,7 +162,7 @@ jobs:
               *-setup.exe) mv "$file" "$out/quicdrop-desktop-$version-x64-setup.exe" ;;
             esac
           done
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: desktop-${{ matrix.name }}
           path: apps/desktop/dist/*
@@ -185,7 +185,7 @@ jobs:
     needs: [cli, desktop, arch]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true

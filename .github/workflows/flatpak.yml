@@ -31,7 +31,7 @@ jobs:
           flatpak-builder --user --force-clean --disable-rofiles-fuse \
             --repo=repo build-dir packaging/flatpak/dev.quicdrop.desktop.yml
           flatpak build-bundle "repo" "dist/quicdrop-$version.flatpak" dev.quicdrop.desktop
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: flatpak-x86_64
           path: dist/*.flatpak
