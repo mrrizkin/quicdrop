@@ -351,14 +351,28 @@ function mergeTransferView(current, incoming) {
 
 function mergeTransfers(current, incoming) {
   const local = new Map(current.map((transfer) => [transfer.id, transfer]));
-  return incoming.map((transfer) => mergeTransferView(local.get(transfer.id), transfer));
+  return incoming
+    .map((transfer) => mergeTransferView(local.get(transfer.id), transfer))
+    .sort(compareTransfers);
+}
+
+/* Bytes-complete transfers still verifying sit below transfers that are moving. */
+function transferRank(transfer) {
+  const status = transferStatus(transfer);
+  if (status === "active") return 0;
+  if (status === "verifying" || status === "waiting") return 1;
+  return 2;
+}
+
+function compareTransfers(a, b) {
+  return transferRank(a) - transferRank(b) || (b.started_at || 0) - (a.started_at || 0);
 }
 
 function upsertTransfer(transfer) {
   const index = state.transfers.findIndex((t) => t.id === transfer.id);
   if (index >= 0) state.transfers[index] = mergeTransferView(state.transfers[index], transfer);
   else state.transfers.unshift(transfer);
-  state.transfers.sort((a, b) => (b.started_at || 0) - (a.started_at || 0));
+  state.transfers.sort(compareTransfers);
   if (state.transfers.length > 50) state.transfers.length = 50;
 }
 
