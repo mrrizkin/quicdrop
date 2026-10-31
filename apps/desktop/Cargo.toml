@@ -1,6 +1,6 @@
 [package]
 name = "quicdrop-desktop"
-version = "2026.44.12"
+version = "2026.44.13"
 edition = "2021"
 license = "MIT"
 description = "QuicDrop desktop app (Tauri shell around the quicdrop daemon)"
