@@ -6,7 +6,9 @@ use qd_core::approval::{self, ApprovalRequest, Decision, APPROVAL_TIMEOUT};
 use qd_core::client::{self, SendOpts};
 use qd_core::proto::FileMeta;
 use qd_core::server::{self, Policy, RunningServer, RuntimeSettings, ServerEvent, ServerEventSink};
-use qd_core::{discovery, Identity, Peer, TrustStore, DEFAULT_DISCOVERY_PORT, DEFAULT_QUIC_PORT};
+use qd_core::{
+    discovery, net, Identity, Peer, TrustStore, DEFAULT_DISCOVERY_PORT, DEFAULT_QUIC_PORT,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -909,7 +911,7 @@ fn peer_choices(peers: &[PeerView]) -> String {
         .join(", ")
 }
 
-/// Resolve a send target: `ip:port`, a known peer, or a discovery lookup.
+/// Resolve a send target: `ip:port`, a hostname, a known peer, or a discovery lookup.
 pub async fn resolve_target(
     inner: &Arc<Inner>,
     target: &str,
@@ -917,6 +919,11 @@ pub async fn resolve_target(
 ) -> Result<(SocketAddr, Option<String>, String)> {
     if let Ok(addr) = target.parse::<SocketAddr>() {
         return Ok((addr, None, target.to_string()));
+    }
+    if net::is_address_like(target) {
+        if let Some(addr) = net::resolve_target_addr(target, inner.quic_port).await {
+            return Ok((addr, None, target.to_string()));
+        }
     }
 
     let needle = target.to_lowercase();
@@ -952,9 +959,18 @@ pub async fn resolve_target(
         false,
     )
     .await?;
-    let peer = discovery::find_peer(&mut disc, target, timeout).await;
+    let found = discovery::find_peer(&mut disc, target, timeout).await;
     disc.stop()?;
-    let peer = peer?;
+    let peer = match found {
+        Ok(peer) => peer,
+        Err(e) => {
+            // A bare hostname may still resolve through the DNS search domain.
+            return match net::resolve_target_addr(target, inner.quic_port).await {
+                Some(addr) => Ok((addr, None, target.to_string())),
+                None => Err(e),
+            };
+        }
+    };
     Ok((
         peer.addr,
         Some(peer.device_id.clone()),

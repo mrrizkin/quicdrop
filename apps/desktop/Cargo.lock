@@ -2949,6 +2949,7 @@ dependencies = [
  "bytes",
  "dirs",
  "hex",
+ "if-addrs",
  "mdns-sd",
  "postcard",
  "quinn",

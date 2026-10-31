@@ -49,9 +49,11 @@ qd trust [add <ID> | rm <ID> | list]
 qd id
 ```
 
-`--to` takes a device name, device id prefix, IP, or `ip:port`. Sending by address skips
-discovery and certificate pinning. Folders are walked recursively, symlinks skipped, relative
-paths recreated on the receiver; an existing file becomes `name (1).ext`.
+`--to` takes a device name, device id prefix, hostname, IP, or `ip:port`. Hostnames resolve
+through DNS, so a Tailscale MagicDNS name (`host.tailnet.ts.net`) or a `100.x` address works
+when UDP 53320 is reachable between nodes. Sending by address skips discovery and
+certificate pinning. Folders are walked recursively, symlinks skipped, relative paths
+recreated on the receiver; an existing file becomes `name (1).ext`.
 
 Names can repeat; the 8-character id shown next to a name is unique. When a name matches
 several devices, `qd` lists the candidates instead of guessing; send to one of their short
@@ -69,8 +71,11 @@ cargo run --manifest-path apps/desktop/Cargo.toml
 
 It embeds the daemon (`quicdropd`, loopback API on 53319) and serves a static `ui/`.
 Linux needs `webkit2gtk-4.1`, `gtk+-3.0`, `libsoup-3.0`, `javascriptcoregtk-4.1`. Peer rows
-show their short id, sends target the device id so the certificate is pinned, and Settings →
-General renames this device without changing its id or trust.
+show their id, and sends target the device id so the certificate is pinned. The Add device
+dialog accepts a hostname or address with an optional label and port. Tailscale peers are
+not discovered automatically, so add them by address. Settings → General renames this
+device without changing its id or trust; Network lists the local addresses, including a
+Tailscale `100.x` interface, click to copy.
 
 ## Protocol
 

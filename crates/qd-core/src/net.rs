@@ -7,7 +7,7 @@ use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, Server
 use rustls::crypto::CryptoProvider;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, Error as TlsError, SignatureScheme};
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,6 +20,61 @@ pub const SOCKET_BUFFER: usize = 8 * 1024 * 1024;
 
 /// Ethernet MTU minus the IPv4 and UDP headers.
 const INITIAL_MTU: u16 = 1452;
+
+/// DNS may stall far longer than a peer discovery window.
+const DNS_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// True when `target` names an address or a dotted host, so DNS should be tried before
+/// discovery. Bare names stay with discovery: a device label is not a hostname.
+pub fn is_address_like(target: &str) -> bool {
+    !target.is_empty()
+        && (target.contains('.') || target.contains(':') || target.parse::<IpAddr>().is_ok())
+}
+
+/// Resolve `ip`, `ip:port`, `[v6]:port`, or `host[:port]`. `default_port` applies when the
+/// target carries none. `None` means the name did not resolve.
+pub async fn resolve_target_addr(target: &str, default_port: u16) -> Option<SocketAddr> {
+    if let Ok(addr) = target.parse::<SocketAddr>() {
+        return Some(addr);
+    }
+    if let Ok(ip) = target.parse::<IpAddr>() {
+        return Some(SocketAddr::new(ip, default_port));
+    }
+    if let Some(host) = target.strip_prefix('[').and_then(|t| t.strip_suffix(']')) {
+        if let Ok(ip) = host.parse::<IpAddr>() {
+            return Some(SocketAddr::new(ip, default_port));
+        }
+    }
+
+    let (host, port) = split_host_port(target, default_port);
+    if host.is_empty() {
+        return None;
+    }
+    let host = host.to_string();
+    let lookup = tokio::task::spawn_blocking(move || {
+        let addrs: Vec<SocketAddr> = (host.as_str(), port).to_socket_addrs().ok()?.collect();
+        // The QUIC endpoints bind IPv4, so an IPv4 answer is the only usable one.
+        addrs
+            .iter()
+            .find(|addr| addr.is_ipv4())
+            .or_else(|| addrs.first())
+            .copied()
+    });
+    match tokio::time::timeout(DNS_TIMEOUT, lookup).await {
+        Ok(Ok(addr)) => addr,
+        _ => None,
+    }
+}
+
+fn split_host_port(target: &str, default_port: u16) -> (&str, u16) {
+    match target.rsplit_once(':') {
+        Some((host, port)) if !host.is_empty() && !host.ends_with(':') => match port.parse() {
+            Ok(port) => (host, port),
+            Err(_) => (target, default_port),
+        },
+        _ => (target, default_port),
+    }
+}
 
 fn provider() -> Arc<CryptoProvider> {
     Arc::new(rustls::crypto::ring::default_provider())
@@ -208,5 +263,42 @@ impl ServerCertVerifier for PinnedVerifier {
         self.provider
             .signature_verification_algorithms
             .supported_schemes()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn address_like_distinguishes_hosts_from_names() {
+        assert!(is_address_like("100.64.0.7"));
+        assert!(is_address_like("host.tailnet.ts.net"));
+        assert!(is_address_like("100.64.0.7:53320"));
+        assert!(!is_address_like("Brave Otter"));
+        assert!(!is_address_like("laptop"));
+    }
+
+    #[test]
+    fn split_host_port_defaults_when_absent() {
+        assert_eq!(split_host_port("laptop", 53320), ("laptop", 53320));
+        assert_eq!(split_host_port("laptop:6000", 53320), ("laptop", 6000));
+        assert_eq!(split_host_port("fe80::1", 53320), ("fe80::1", 53320));
+    }
+
+    #[tokio::test]
+    async fn literal_addresses_skip_dns() {
+        assert_eq!(
+            resolve_target_addr("100.64.0.7", 53320).await,
+            Some("100.64.0.7:53320".parse().expect("address"))
+        );
+        assert_eq!(
+            resolve_target_addr("100.64.0.7:6000", 53320).await,
+            Some("100.64.0.7:6000".parse().expect("address"))
+        );
+        assert_eq!(
+            resolve_target_addr("[::1]", 53320).await,
+            Some("[::1]:53320".parse().expect("address"))
+        );
     }
 }

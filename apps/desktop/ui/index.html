@@ -27,6 +27,7 @@
       <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></symbol>
       <symbol id="i-inbox" viewBox="0 0 24 24"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.5 5.1L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.5-6.9A2 2 0 0 0 16.7 4H7.3a2 2 0 0 0-1.8 1.1z"/></symbol>
       <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></symbol>
+      <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
     </svg>
 
     <div class="drop-overlay" id="drop-overlay">
@@ -56,7 +57,12 @@
           <span class="dot" id="device-dot"></span>
         </div>
 
-        <div class="cap">Devices <span class="count" id="peer-count">0</span></div>
+        <div class="cap">
+          Devices <span class="count" id="peer-count">0</span>
+          <button class="icon-btn cap-add" id="btn-add-device" title="Add device" aria-label="Add device">
+            <svg class="i"><use href="#i-plus"/></svg>
+          </button>
+        </div>
         <ul class="list peer-list" id="peer-list"></ul>
 
         <div class="cap">Trusted <span class="count" id="trust-count">0</span></div>
@@ -117,6 +123,43 @@
       </div>
     </div>
 
+    <div class="modal-backdrop" id="add-modal" hidden>
+      <form class="modal add-device-modal" id="add-form" autocomplete="off">
+        <div class="modal-head">
+          <svg class="i"><use href="#i-plus"/></svg>
+          <div class="modal-title">
+            <strong>Add device</strong>
+            <span class="dim">Reach a device by hostname or IP.</span>
+          </div>
+          <button class="icon-btn" type="button" id="add-close" title="Close" aria-label="Close">
+            <svg class="i"><use href="#i-x"/></svg>
+          </button>
+        </div>
+        <div class="modal-body">
+          <label class="field">
+            <span>Address</span>
+            <input class="input" id="add-address" type="text" placeholder="hostname or IP address" spellcheck="false" />
+          </label>
+          <label class="field">
+            <span>Port</span>
+            <input class="input" id="add-port" type="text" inputmode="numeric" placeholder="53320" spellcheck="false" />
+          </label>
+          <label class="field">
+            <span>Label</span>
+            <input class="input" id="add-label" type="text" maxlength="48" placeholder="Optional, shown in the list" spellcheck="false" />
+          </label>
+          <p class="field-note" id="add-hint">
+            A hostname or IP address. The port is ignored when the address already includes one.
+          </p>
+        </div>
+        <div class="modal-foot">
+          <span class="grow"></span>
+          <button class="btn" type="button" id="add-cancel">Cancel</button>
+          <button class="btn primary" type="submit">Add device</button>
+        </div>
+      </form>
+    </div>
+
     <div class="modal-backdrop" id="settings-modal" hidden>
       <div class="modal settings">
         <div class="modal-head">
@@ -142,13 +185,13 @@
                 <input class="input" id="settings-name" type="text" maxlength="48" spellcheck="false" />
               </label>
               <p class="field-note">
-                Names can repeat. The short id is unique; share it to receive files.
+                Names can repeat. The id is unique; share it to receive files.
               </p>
               <div class="kv">
-                <span>Short id</span><code id="settings-short-id">—</code>
+                <span>Id</span><code id="settings-short-id">—</code>
               </div>
               <div class="row end">
-                <button class="btn" id="settings-copy-short">Copy short id</button>
+                <button class="btn" id="settings-copy-short">Copy id</button>
               </div>
               <label class="field">
                 <span>Theme</span>
@@ -213,7 +256,7 @@
               <div class="kv">
                 <span>QUIC</span><code id="about-quic">—</code>
                 <span>Discovery</span><code id="about-disc">—</code>
-                <span>Local</span><code id="about-addrs">—</code>
+                <span>Local</span><div class="addrs" id="about-addrs">—</div>
               </div>
             </section>
 
@@ -222,13 +265,13 @@
                 <span>Version</span><code id="about-version">—</code>
                 <span>Platform</span><code id="about-platform">—</code>
                 <span>Device</span><code id="about-name">—</code>
-                <span>Short id</span><code id="about-short">—</code>
+                <span>Id</span><code id="about-short">—</code>
                 <span>Device id</span>
                 <code id="about-id">—</code>
                 <span>Config</span><code id="about-config">—</code>
               </div>
               <div class="row end">
-                <button class="btn" id="about-copy-short">Copy short id</button>
+                <button class="btn" id="about-copy-short">Copy id</button>
                 <button class="btn" id="about-copy">Copy device id</button>
               </div>
             </section>

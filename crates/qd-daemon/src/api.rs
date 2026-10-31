@@ -99,7 +99,7 @@ struct Respond {
 
 #[derive(Deserialize)]
 struct SendRequest {
-    /// Peer name, device id prefix, `ip:port`, or an address.
+    /// Peer name, device id prefix, hostname, `ip:port`, or an address.
     to: String,
     /// Display name for the transfer list when `to` is a device id.
     #[serde(default)]

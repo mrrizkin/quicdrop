@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use qd_core::approval;
 use qd_core::client::SendOpts;
+use qd_core::net::{is_address_like, resolve_target_addr};
 use qd_core::server::{serve, start, Policy, ServerOpts};
 use qd_core::trust::TrustStore;
 use qd_core::{Identity, DEFAULT_DISCOVERY_PORT, DEFAULT_QUIC_PORT};
@@ -61,7 +62,7 @@ enum Command {
         #[arg(required = true)]
         paths: Vec<PathBuf>,
 
-        /// Peer name, device id prefix, IP, or ip:port
+        /// Peer name, device id prefix, IP, hostname, or ip:port
         #[arg(short, long)]
         to: String,
 
@@ -280,15 +281,40 @@ async fn resolve_peer(
         return Ok((addr, None, target.to_string()));
     }
 
+    if is_address_like(target) {
+        if let Some(addr) = resolve_target_addr(target, quic_port).await {
+            if !quiet {
+                eprintln!("note: connecting by address skips peer identity verification");
+            }
+            return Ok((addr, None, target.to_string()));
+        }
+    }
+
     let identity = Arc::new(Identity::load_or_create(name)?);
     let mut disc = qd_core::discovery::start(identity, quic_port, discovery_port, false).await?;
     if !quiet {
         eprintln!("looking for \"{target}\" (up to {timeout:?})...");
     }
-    let peer = qd_core::discovery::find_peer(&mut disc, target, timeout).await?;
+    let found = qd_core::discovery::find_peer(&mut disc, target, timeout).await;
     disc.stop()?;
-    let label = format!("{} ({})", peer.name, peer.short_id());
-    Ok((peer.addr, Some(peer.device_id), label))
+    match found {
+        Ok(peer) => {
+            let label = format!("{} ({})", peer.name, peer.short_id());
+            Ok((peer.addr, Some(peer.device_id), label))
+        }
+        Err(e) => {
+            // A bare hostname may still resolve through the DNS search domain.
+            match resolve_target_addr(target, quic_port).await {
+                Some(addr) => {
+                    if !quiet {
+                        eprintln!("note: connecting by address skips peer identity verification");
+                    }
+                    Ok((addr, None, target.to_string()))
+                }
+                None => Err(e),
+            }
+        }
+    }
 }
 
 fn parse_duration(s: &str) -> Result<Duration> {

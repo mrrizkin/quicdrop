@@ -483,11 +483,19 @@ fn bind_discovery_socket(port: u16, primary: Option<IpAddr>) -> Result<UdpSocket
     Ok(UdpSocket::from_std(sock.into())?)
 }
 
-/// Local IPv4 addresses, primary first. Blocks on a hostname lookup, so async callers
-/// use [`local_ipv4_addrs_async`].
+/// Local IPv4 addresses, primary first, then every interface. Blocks on a hostname lookup,
+/// so async callers use [`local_ipv4_addrs_async`].
 pub fn local_ipv4_addrs() -> Vec<IpAddr> {
     let mut out: Vec<IpAddr> = Vec::new();
     if let Some(ip) = primary_ip() {
+        out.push(ip);
+    }
+    // Covers interfaces the routing table does not pick, such as a Tailscale 100.x address.
+    for interface in if_addrs::get_if_addrs().unwrap_or_default() {
+        let ip = interface.ip();
+        if interface.is_loopback() || !ip.is_ipv4() || out.contains(&ip) {
+            continue;
+        }
         out.push(ip);
     }
     for ip in extra_local_ips() {

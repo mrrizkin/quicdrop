@@ -55,6 +55,10 @@
   box-sizing: border-box;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   margin: 0;
@@ -272,6 +276,23 @@ select {
   color: var(--text-3);
 }
 
+.cap .cap-add {
+  width: 18px;
+  height: 16px;
+  margin-left: -2px;
+  color: var(--text-3);
+}
+
+.cap .cap-add:hover:not(:disabled) {
+  background: transparent;
+  color: var(--text-2);
+}
+
+.cap-add .i {
+  width: 12px;
+  height: 12px;
+}
+
 .list {
   list-style: none;
   margin: 0;
@@ -290,11 +311,25 @@ select {
   display: flex;
   align-items: center;
   gap: 8px;
-  height: 30px;
-  padding: 0 6px;
+  padding: 5px 6px;
   border-radius: var(--radius-sm);
   cursor: default;
   user-select: none;
+}
+
+.peer .avatar {
+  width: 28px;
+  height: 28px;
+  flex-basis: 28px;
+  font-size: 12px;
+}
+
+.peer-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
 }
 
 .peer:hover {
@@ -306,27 +341,86 @@ select {
   box-shadow: inset 2px 0 0 var(--accent);
 }
 
-.peer-top {
+.peer-row {
   display: flex;
   align-items: center;
-  gap: 7px;
-  min-width: 0;
-  flex: 1;
-}
-
-.peer-main {
+  justify-content: space-between;
+  gap: 8px;
   min-width: 0;
 }
 
-.peer-name {
+.peer-tags {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-3);
+}
+
+.peer-meta-left {
   display: flex;
   align-items: baseline;
   gap: 6px;
-  font-size: 12.5px;
   min-width: 0;
 }
 
+.peer-os {
+  font-size: 10px;
+  color: var(--text-3);
+  letter-spacing: 0.02em;
+}
+
+.peer-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.peer-action {
+  width: 22px;
+  height: 20px;
+}
+
+.peer-action .i {
+  width: 13px;
+  height: 13px;
+}
+
+.addrs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+}
+
+.addr {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 6px;
+  border: 1px solid var(--sep);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.addr:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.addr .tag {
+  font-family: inherit;
+  font-size: 9.5px;
+  color: var(--text-3);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
 .peer-label {
+  font-size: 12.5px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -340,29 +434,9 @@ select {
   letter-spacing: 0.02em;
 }
 
-.peer.selected .peer-name {
+.peer.selected .peer-label {
   font-weight: 600;
   color: var(--accent);
-}
-
-.peer-meta {
-  display: none;
-}
-
-.peer-meta .sep {
-  display: none;
-}
-
-.peer-foot {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.chip {
-  font-size: 10px;
-  color: var(--text-3);
-  text-transform: lowercase;
 }
 
 .trusted-tag {
@@ -371,15 +445,6 @@ select {
 
 .peer-check {
   display: none;
-}
-
-.peer-send {
-  opacity: 0;
-}
-
-.peer:hover .peer-send,
-.peer.selected .peer-send {
-  opacity: 1;
 }
 
 .peer-empty {
@@ -636,6 +701,32 @@ select {
   white-space: nowrap;
 }
 
+.t-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 2px;
+  font-size: 10px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.t-counts .active {
+  color: var(--accent);
+}
+
+.t-counts .queue {
+  color: var(--text-3);
+}
+
+.t-counts .done {
+  color: var(--ok);
+}
+
+.t-counts .failed {
+  color: var(--err);
+}
+
 .bar {
   height: 2px;
   margin: 4px 0 0;
@@ -716,6 +807,57 @@ select {
   padding: 1px 0;
   font-size: 10.5px;
   color: var(--text-3);
+}
+
+.file-row.grouped {
+  padding-left: 12px;
+}
+
+.file-group {
+  margin-top: 2px;
+}
+
+.file-group-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  padding: 2px 0;
+  border: 0;
+  background: none;
+  color: var(--text-3);
+  font: inherit;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-align: left;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.file-group-head:hover {
+  color: var(--text-2);
+}
+
+.file-group-head .chev {
+  width: 9px;
+}
+
+.file-group-head .count {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+.file-group.active .file-group-head {
+  color: var(--accent);
+}
+
+.file-group.done .file-group-head {
+  color: var(--ok);
+}
+
+.file-group.failed .file-group-head {
+  color: var(--err);
 }
 
 .file-name {
@@ -811,6 +953,14 @@ select {
 
 .modal.approval {
   width: 420px;
+}
+
+.modal.add-device-modal {
+  width: 420px;
+}
+
+.field-note[data-error="1"] {
+  color: var(--err);
 }
 
 .modal-head {

@@ -6,6 +6,7 @@ const { listen } = window.__TAURI__.event;
 const state = {
   info: {},
   peers: [],
+  manual: [],
   transfers: [],
   approvals: [],
   trust: [],
@@ -17,12 +18,6 @@ const state = {
 const $ = (id) => document.getElementById(id);
 
 const icon = (name) => `<svg class="i"><use href="#i-${name}"/></svg>`;
-const platformIcon = (platform) =>
-  /android|ios/i.test(platform || "")
-    ? "phone"
-    : /windows|macos|linux/i.test(platform || "")
-      ? "laptop"
-      : "monitor";
 
 
 const esc = (value) =>
@@ -123,6 +118,7 @@ const prefs = {
   density: "comfortable",
   motion: true,
   openAfter: false,
+  addresses: [],
 };
 
 function loadPrefs() {
@@ -186,7 +182,7 @@ async function refresh() {
       api("GET", "/api/approvals"),
     ]);
     state.info = status;
-    state.peers = peers;
+    state.peers = mergePeers(peers);
     state.transfers = mergeTransfers(state.transfers, transfers);
     state.trust = trust;
     state.config = config;
@@ -201,7 +197,86 @@ function peerKey(peer) {
   return peer.device_id || peer.addr;
 }
 
+function manualPeer(addr, label = "") {
+  const clean = String(label || "").trim();
+  return {
+    device_id: "",
+    name: clean || addr,
+    label: clean,
+    platform: "",
+    addr,
+    source: "address",
+    trusted: false,
+    manual: true,
+    last_seen: 0,
+  };
+}
+
+function withDefaultPort(target, port) {
+  if (!port) return target;
+  if (target.startsWith("[")) {
+    return target.includes("]:") ? target : `${target.replace(/\]$/, "")}]:${port}`;
+  }
+  const colons = (target.match(/:/g) || []).length;
+  if (colons === 0) return `${target}:${port}`;
+  if (colons === 1) return /:\d+$/.test(target) ? target : `${target}:${port}`;
+  return `[${target}]:${port}`;
+}
+
+function loadManualPeers() {
+  const port = state.info.quic_port || 53320;
+  const saved = Array.isArray(prefs.addresses) ? prefs.addresses : [];
+  state.manual = saved
+    .map((entry) => {
+      const raw = typeof entry === "string" ? entry : entry?.addr;
+      if (!raw) return null;
+      const label = typeof entry === "string" ? "" : entry.label || "";
+      return manualPeer(withDefaultPort(raw, port), label);
+    })
+    .filter(Boolean);
+  saveManualPrefs();
+}
+
+function saveManualPrefs() {
+  prefs.addresses = state.manual.map((peer) => ({ addr: peer.addr, label: peer.label || "" }));
+  savePrefs();
+}
+
+/* Discovered peers replace manual entries with the same address. */
+function mergePeers(serverPeers) {
+  const known = new Map(serverPeers.map((peer) => [peer.addr, peer]));
+  const superseded = state.manual.find((peer) => peer.addr === state.selectedPeer);
+  const replacement = superseded && known.get(superseded.addr);
+  if (replacement) state.selectedPeer = peerKey(replacement);
+  const manual = state.manual.filter((peer) => !known.has(peer.addr));
+  return [...serverPeers, ...manual].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function addManualPeer(rawAddress, label, port) {
+  const addr = withDefaultPort(String(rawAddress || "").trim(), port || state.info.quic_port || 53320);
+  if (!addr) return "";
+  if (state.manual.some((peer) => peer.addr === addr) || state.peers.some((peer) => peer.addr === addr)) {
+    toast(`${addr} is already in the list.`);
+    return "";
+  }
+  const peer = manualPeer(addr, label);
+  state.manual.push(peer);
+  state.peers.push(peer);
+  state.peers.sort((a, b) => a.name.localeCompare(b.name));
+  saveManualPrefs();
+  return addr;
+}
+
+function removeManualPeer(addr) {
+  state.manual = state.manual.filter((peer) => peer.addr !== addr);
+  state.peers = state.peers.filter((peer) => peer.addr !== addr);
+  if (state.selectedPeer === addr) state.selectedPeer = null;
+  saveManualPrefs();
+  renderPeers();
+}
+
 function upsertPeer(peer) {
+  state.peers = state.peers.filter((p) => !(p.manual && p.addr === peer.addr));
   const index = state.peers.findIndex((p) => peerKey(p) === peerKey(peer));
   if (index >= 0) state.peers[index] = peer;
   else state.peers.push(peer);
@@ -209,6 +284,43 @@ function upsertPeer(peer) {
 }
 
 const TERMINAL_STATUS = new Set(["done", "failed", "cancelled", "declined"]);
+
+const FILE_PHASES = ["active", "queue", "done", "failed"];
+const FILE_PHASE_LABELS = {
+  active: "In progress",
+  queue: "Queued",
+  done: "Done",
+  failed: "Failed",
+};
+
+function filePhase(file) {
+  if (file.ok === true) return "done";
+  if (file.ok === false) return "failed";
+  return (file.done || 0) > 0 ? "active" : "queue";
+}
+
+function filePhases(transfer) {
+  const counts = { active: 0, queue: 0, done: 0, failed: 0 };
+  (transfer.files || []).forEach((file) => {
+    counts[filePhase(file)] += 1;
+  });
+  return counts;
+}
+
+/* Folder shares keep their root as the first path segment of every file. */
+function folderRoot(transfer) {
+  const files = transfer.files || [];
+  if (files.length === 0) return null;
+  const roots = new Set();
+  for (const file of files) {
+    const name = String(file.name || "");
+    const slash = name.indexOf("/");
+    if (slash <= 0) return null;
+    roots.add(name.slice(0, slash));
+  }
+  const unique = [...roots];
+  return { name: unique.length === 1 ? unique[0] : `${unique.length} folders` };
+}
 
 /* Keep the furthest progress and terminal status from a late HTTP snapshot. */
 function mergeTransferView(current, incoming) {
@@ -269,7 +381,7 @@ function renderDevice() {
   const { name, short_id: shortIdValue, device_id } = state.info;
   $("device-name").textContent = name || "this device";
   const short = shortIdValue || String(device_id || "").slice(0, 8);
-  $("device-id").textContent = short ? `short id ${short}` : "";
+  $("device-id").textContent = short ? `id ${short}` : "";
   $("device-id").title = device_id ? `Device id: ${device_id}` : "";
   $("device-dot").classList.add("on");
   const avatar = $("self-avatar");
@@ -304,28 +416,36 @@ function renderPeers() {
     .map((peer) => {
       const key = peerKey(peer);
       const isSelected = state.selectedPeer === key;
+      const idLabel = peer.manual ? "address" : shortId(peer.device_id);
+      const title = peer.manual
+        ? `Send to ${peer.label ? `${peer.label} (${peer.addr})` : peer.addr}`
+        : `${peer.name} · id ${shortId(peer.device_id)}`;
+      const platform = peer.manual
+        ? ""
+        : `<span class="peer-os" title="Platform">${esc(peer.platform || "unknown")}</span>`;
       return `
         <li class="peer ${isSelected ? "selected" : ""}" data-key="${esc(key)}"
-            title="${esc(peer.name)} · id ${esc(shortId(peer.device_id))}">
+            title="${esc(title)}">
           <span class="peer-check">✓</span>
-          <div class="peer-top">
-            <div class="avatar" style="--hue:${hueFor(peer.device_id)}">${initial(peer.name)}</div>
-            <div class="peer-main">
-              <div class="peer-name">
-                <span class="peer-label">${esc(peer.name)}</span>
-                <span class="peer-id" title="device id">${shortId(peer.device_id)}</span>
-              </div>
-              <div class="peer-meta">
-                <span>${shortId(peer.device_id)}</span>
-                <span class="sep">·</span>
-                <span>${esc(peer.source || "mdns")}</span>
-              </div>
+          <div class="avatar" style="--hue:${hueFor(peer.device_id || peer.addr)}">${initial(peer.name)}</div>
+          <div class="peer-lines">
+            <div class="peer-row">
+              <span class="peer-label">${esc(peer.name)}</span>
+              <span class="peer-tags">
+                ${peer.trusted ? `<span title="Trusted">${icon("shield")}</span>` : ""}
+              </span>
             </div>
-          </div>
-          <div class="peer-foot">
-            <span class="chip" title="${esc(peer.platform || "unknown")}">${icon(platformIcon(peer.platform))}</span>
-            ${peer.trusted ? `<span title="Trusted">${icon("shield")}</span>` : ""}
-            <button class="icon-btn peer-send" data-send="${esc(key)}" title="Send">${icon("upload")}</button>
+            <div class="peer-row">
+              <span class="peer-meta-left">
+                <span class="peer-id" title="${peer.manual ? "address" : "device id"}">${idLabel}</span>
+                ${platform}
+              </span>
+              <span class="peer-actions">
+                ${peer.manual ? `<button class="icon-btn peer-action" data-remove="${esc(peer.addr)}" title="Remove">${icon("trash")}</button>` : ""}
+                <button class="icon-btn peer-action" data-send-files="${esc(key)}" title="Send files">${icon("upload")}</button>
+                <button class="icon-btn peer-action" data-send-folders="${esc(key)}" title="Send folders">${icon("folder")}</button>
+              </span>
+            </div>
           </div>
         </li>`;
     })
@@ -333,15 +453,28 @@ function renderPeers() {
 
   list.querySelectorAll(".peer").forEach((row) => {
     row.addEventListener("click", (event) => {
-      if (event.target.closest("[data-send]")) return;
+      if (event.target.closest("[data-send-files]") || event.target.closest("[data-send-folders]")) return;
       selectPeer(row.dataset.key);
     });
   });
-  list.querySelectorAll("[data-send]").forEach((button) => {
+  list.querySelectorAll("[data-remove]").forEach((button) => {
     button.addEventListener("click", (event) => {
       event.stopPropagation();
-      selectPeer(button.dataset.send);
-      sendToSelected();
+      removeManualPeer(button.dataset.remove);
+    });
+  });
+  list.querySelectorAll("[data-send-files]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const peer = peerByKey(button.dataset.sendFiles);
+      if (peer) sendFilesToPeer(peer);
+    });
+  });
+  list.querySelectorAll("[data-send-folders]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const peer = peerByKey(button.dataset.sendFolders);
+      if (peer) sendFoldersToPeer(peer);
     });
   });
 }
@@ -382,6 +515,17 @@ function renderTrust() {
 const FILE_ROWS_INITIAL = 100;
 const FILE_ROWS_MAX = 500;
 const expandedFiles = new Set();
+const fileGroupOpen = new Map();
+const DEFAULT_OPEN_PHASES = new Set(["active"]);
+
+function openPhasesFor(transfer) {
+  let phases = fileGroupOpen.get(transfer.id);
+  if (!phases) {
+    phases = new Set(DEFAULT_OPEN_PHASES);
+    fileGroupOpen.set(transfer.id, phases);
+  }
+  return phases;
+}
 const transferRows = new Map();
 const dirtyTransfers = new Set();
 const dirtyFiles = new Map();
@@ -400,7 +544,10 @@ function transferStatus(transfer) {
 }
 
 function filesKey(transfer) {
-  return `${(transfer.files || []).length}|${state.fileQuery}|${expandedFiles.has(transfer.id) ? "all" : "part"}`;
+  const folder = folderRoot(transfer);
+  const phases = folder ? (transfer.files || []).map(filePhase).join("") : "";
+  const open = folder ? [...openPhasesFor(transfer)].sort().join(",") : "";
+  return `${(transfer.files || []).length}|${state.fileQuery}|${expandedFiles.has(transfer.id) ? "all" : "part"}|${phases}|${open}`;
 }
 
 /* Peers and trust change on every beacon; rebuild their lists at most once a frame. */
@@ -488,6 +635,7 @@ function createTransferView(transfer) {
         <button class="icon-btn" type="button" title="Cancel">${icon("stop")}</button>
       </div>
       <div class="transfer-sub"></div>
+      <div class="t-counts" hidden></div>
       <div class="bar"><span></span></div>
       <ul class="file-rows"></ul>
     </div>
@@ -501,6 +649,7 @@ function createTransferView(transfer) {
     title: el.querySelector(".transfer-title"),
     cancel: el.querySelector("[title='Cancel']"),
     sub: el.querySelector(".transfer-sub"),
+    counts: el.querySelector(".t-counts"),
     bar: el.querySelector(".bar > span"),
     files: el.querySelector(".file-rows"),
     status: el.querySelector(".status"),
@@ -535,12 +684,24 @@ function updateTransferView(view, transfer) {
   ].filter(Boolean);
   if (transfer.error) bits.push(esc(transfer.error));
 
+  const folder = folderRoot(transfer);
+  const counts = folder ? filePhases(transfer) : null;
   view.el.className = `transfer ${transfer.status}`;
   view.dir.className = `dir ${transfer.direction}`;
   view.dir.innerHTML = icon(transfer.direction === "in" ? "download" : "upload");
-  view.title.textContent = summary;
-  view.title.title = summary;
+  view.title.textContent = folder ? folder.name : summary;
+  view.title.title = folder ? folder.name : summary;
   view.sub.innerHTML = bits.join(" · ");
+  if (counts) {
+    view.counts.innerHTML = FILE_PHASES.map(
+      (phase) =>
+        `<span class="${phase}">${counts[phase]} ${FILE_PHASE_LABELS[phase].toLowerCase()}</span>`,
+    ).join("");
+    view.counts.hidden = false;
+  } else {
+    view.counts.innerHTML = "";
+    view.counts.hidden = true;
+  }
   view.bar.style.width = `${pct}%`;
   view.status.className = `status ${status}`;
   view.status.textContent = status;
@@ -594,6 +755,7 @@ function rebuildFileRows(view, transfer) {
   const query = state.fileQuery.trim().toLowerCase();
   const expanded = expandedFiles.has(transfer.id);
   const limit = expanded ? FILE_ROWS_MAX : FILE_ROWS_INITIAL;
+  const folder = folderRoot(transfer);
   const matches = [];
   files.forEach((file, index) => {
     if (!query || file.name.toLowerCase().includes(query)) matches.push(index);
@@ -601,16 +763,67 @@ function rebuildFileRows(view, transfer) {
 
   view.files.replaceChildren();
   view.fileNodes = new Map();
-  view.files.hidden = files.length === 0;
-  if (files.length === 0) {
+  view.files.hidden = files.length === 0 || (files.length === 1 && !folder);
+  if (view.files.hidden) {
     view.filesKey = filesKey(transfer);
     return;
   }
 
-  matches.slice(0, limit).forEach((index) => {
-    const row = createFileRow(index, files[index]);
-    view.fileNodes.set(index, row);
-    view.files.appendChild(row.el);
+  if (!folder) {
+    matches.slice(0, limit).forEach((index) => {
+      const row = createFileRow(index, files[index]);
+      view.fileNodes.set(index, row);
+      view.files.appendChild(row.el);
+    });
+
+    if (matches.length === 0) {
+      const empty = document.createElement("li");
+      empty.className = "file-more";
+      empty.textContent = "No file matches.";
+      view.files.appendChild(empty);
+    } else if (matches.length > limit) {
+      view.files.appendChild(fileMore(transfer, matches.length - limit, expanded));
+    }
+    view.filesKey = filesKey(transfer);
+    return;
+  }
+
+  const open = openPhasesFor(transfer);
+  const searching = query.length > 0;
+  const byPhase = { active: [], queue: [], done: [], failed: [] };
+  matches.forEach((index) => byPhase[filePhase(files[index])].push(index));
+
+  FILE_PHASES.forEach((phase) => {
+    const indices = byPhase[phase];
+    if (indices.length === 0) return;
+    const isOpen = searching || open.has(phase);
+    const head = document.createElement("li");
+    head.className = `file-group ${phase}`;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "file-group-head";
+    button.setAttribute("aria-expanded", String(isOpen));
+    button.innerHTML = `<span class="chev">${isOpen ? "▾" : "▸"}</span><span>${FILE_PHASE_LABELS[phase]}</span><span class="count">${indices.length}</span>`;
+    if (!searching) {
+      button.addEventListener("click", () => {
+        if (open.has(phase)) open.delete(phase);
+        else open.add(phase);
+        markTransferDirty(transfer.id);
+      });
+    }
+    head.appendChild(button);
+    view.files.appendChild(head);
+    if (!isOpen) return;
+
+    indices.slice(0, limit).forEach((index) => {
+      const row = createFileRow(index, files[index]);
+      row.el.classList.add("grouped");
+      view.fileNodes.set(index, row);
+      view.files.appendChild(row.el);
+    });
+    if (indices.length > limit) {
+      view.files.appendChild(fileMore(transfer, indices.length - limit, expanded));
+    }
   });
 
   if (matches.length === 0) {
@@ -618,26 +831,27 @@ function rebuildFileRows(view, transfer) {
     empty.className = "file-more";
     empty.textContent = "No file matches.";
     view.files.appendChild(empty);
-  } else if (matches.length > limit) {
-    const more = document.createElement("li");
-    more.className = "file-more";
-    const remaining = matches.length - limit;
-    if (!expanded) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "link-btn";
-      button.textContent = `Show ${remaining} more`;
-      button.addEventListener("click", () => {
-        expandedFiles.add(transfer.id);
-        markTransferDirty(transfer.id);
-      });
-      more.appendChild(button);
-    } else {
-      more.textContent = `+${remaining} more`;
-    }
-    view.files.appendChild(more);
   }
   view.filesKey = filesKey(transfer);
+}
+
+function fileMore(transfer, remaining, expanded) {
+  const more = document.createElement("li");
+  more.className = "file-more";
+  if (!expanded) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "link-btn";
+    button.textContent = `Show ${remaining} more`;
+    button.addEventListener("click", () => {
+      expandedFiles.add(transfer.id);
+      markTransferDirty(transfer.id);
+    });
+    more.appendChild(button);
+  } else {
+    more.textContent = `+${remaining} more`;
+  }
+  return more;
 }
 
 function renderTransfers(force = false) {
@@ -696,7 +910,10 @@ function renderTransfers(force = false) {
 
   while (cursor) {
     const next = cursor.nextElementSibling;
-    if (cursor.dataset.transfer) transferRows.delete(cursor.dataset.transfer);
+    if (cursor.dataset.transfer) {
+      transferRows.delete(cursor.dataset.transfer);
+      fileGroupOpen.delete(cursor.dataset.transfer);
+    }
     cursor.remove();
     cursor = next;
   }
@@ -758,6 +975,10 @@ async function sendToSelected() {
     toast("Select a device first.");
     return;
   }
+  await sendFilesToPeer(peer);
+}
+
+async function sendFilesToPeer(peer) {
   try {
     const paths = await invoke("pick_files");
     if (!paths || paths.length === 0) return;
@@ -767,12 +988,7 @@ async function sendToSelected() {
   }
 }
 
-async function sendFolderToSelected() {
-  const peer = peerByKey(state.selectedPeer);
-  if (!peer) {
-    toast("Select a device first.");
-    return;
-  }
+async function sendFoldersToPeer(peer) {
   try {
     const dirs = await invoke("pick_folders");
     if (!dirs || dirs.length === 0) return;
@@ -782,19 +998,40 @@ async function sendFolderToSelected() {
   }
 }
 
-async function sendPaths(peer, paths, message) {
+async function sendFolderToSelected() {
+  const peer = peerByKey(state.selectedPeer);
+  if (!peer) {
+    toast("Select a device first.");
+    return;
+  }
+  await sendFoldersToPeer(peer);
+}
+
+async function sendToTarget(to, name, paths, message) {
   try {
     await api("POST", "/api/send", {
-      // Device id is unique and pins the certificate; a name can repeat.
-      to: peer.device_id || peer.addr,
-      peer_name: peer.name,
+      to,
+      peer_name: name,
       paths,
       concurrency: 8,
     });
-    toast(message || `Sending to ${peer.name} (${shortId(peer.device_id)})…`);
+    toast(message || (name ? `Sending to ${name}…` : `Sending to ${to}…`));
   } catch (error) {
     toast(`Send failed: ${error}`);
   }
+}
+
+async function sendPaths(peer, paths, message) {
+  // Device id is unique and pins the certificate; a name can repeat.
+  await sendToTarget(
+    peer.device_id || peer.addr,
+    peer.name,
+    paths,
+    message ||
+      (peer.manual
+        ? `Sending to ${peer.name}…`
+        : `Sending to ${peer.name} (${shortId(peer.device_id)})…`),
+  );
 }
 
 async function forget(deviceId) {
@@ -841,10 +1078,51 @@ async function openSettings() {
   $("about-config").textContent = info.config_dir || "—";
   $("about-quic").textContent = info.quic_port ? `udp/${info.quic_port}` : "—";
   $("about-disc").textContent = info.discovery_port ? `udp/${info.discovery_port}` : "—";
-  $("about-addrs").textContent = (info.local_addrs || []).join(", ") || "—";
+  renderLocalAddrs(info);
   $("settings-hint").textContent = "";
   showPane("general");
   $("settings-modal").hidden = false;
+}
+
+function isTailscale(ip) {
+  const [a, b] = String(ip).split(".").map(Number);
+  return a === 100 && b >= 64 && b <= 127;
+}
+
+function renderLocalAddrs(info) {
+  const box = $("about-addrs");
+  box.textContent = "";
+  const port = info.quic_port;
+  const addrs = info.local_addrs || [];
+  if (!addrs.length) {
+    box.textContent = "—";
+    return;
+  }
+  addrs.forEach((ip) => {
+    const target = port ? `${ip}:${port}` : ip;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "addr";
+    button.title = `Copy ${target}`;
+    const label = document.createElement("span");
+    label.textContent = ip;
+    button.append(label);
+    if (isTailscale(ip)) {
+      const tag = document.createElement("span");
+      tag.className = "tag";
+      tag.textContent = "tailscale";
+      button.append(tag);
+    }
+    button.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(target);
+        $("settings-hint").textContent = `Copied ${target}`;
+      } catch (_) {
+        $("settings-hint").textContent = "Could not copy.";
+      }
+    });
+    box.append(button);
+  });
 }
 
 async function saveSettings() {
@@ -901,7 +1179,7 @@ $("settings-clear").addEventListener("click", async () => {
 $("settings-copy-short").addEventListener("click", async () => {
   try {
     await navigator.clipboard.writeText(state.info.short_id || "");
-    $("settings-hint").textContent = "Short id copied.";
+    $("settings-hint").textContent = "Id copied.";
   } catch (_) {
     $("settings-hint").textContent = "Could not copy.";
   }
@@ -909,7 +1187,7 @@ $("settings-copy-short").addEventListener("click", async () => {
 $("about-copy-short").addEventListener("click", async () => {
   try {
     await navigator.clipboard.writeText(state.info.short_id || "");
-    $("settings-hint").textContent = "Short id copied.";
+    $("settings-hint").textContent = "Id copied.";
   } catch (_) {
     $("settings-hint").textContent = "Could not copy.";
   }
@@ -923,6 +1201,65 @@ $("about-copy").addEventListener("click", async () => {
   }
 });
 $("btn-send").addEventListener("click", sendToSelected);
+
+const ADD_HINT =
+  "A MagicDNS or DNS name works when discovery cannot cross the network. The port is ignored if the address already contains one.";
+
+function setAddHint(message) {
+  const hint = $("add-hint");
+  hint.textContent = message || ADD_HINT;
+  hint.dataset.error = message ? "1" : "";
+}
+
+function openAddDevice() {
+  $("add-address").value = "";
+  $("add-port").value = String(state.info.quic_port || 53320);
+  $("add-label").value = "";
+  setAddHint("");
+  $("add-modal").hidden = false;
+  $("add-address").focus();
+}
+
+function closeAddDevice() {
+  $("add-modal").hidden = true;
+}
+
+function parsePort(value) {
+  const text = String(value || "").trim();
+  if (!text) return null;
+  if (!/^\d+$/.test(text)) return 0;
+  const port = Number(text);
+  return port >= 1 && port <= 65535 ? port : 0;
+}
+
+$("btn-add-device").addEventListener("click", openAddDevice);
+$("add-close").addEventListener("click", closeAddDevice);
+$("add-cancel").addEventListener("click", closeAddDevice);
+$("add-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const address = $("add-address").value.trim();
+  if (!address) {
+    setAddHint("Enter a hostname or IP address.");
+    $("add-address").focus();
+    return;
+  }
+  const port = parsePort($("add-port").value);
+  if (port === 0) {
+    setAddHint("Port must be between 1 and 65535.");
+    $("add-port").focus();
+    return;
+  }
+  const addr = addManualPeer(address, $("add-label").value, port);
+  if (!addr) {
+    setAddHint("That address is already in the list.");
+    return;
+  }
+  closeAddDevice();
+  state.selectedPeer = addr;
+  renderPeers();
+  toast(`${addr} added. Choose files or a folder.`);
+});
+
 $("transfer-search").addEventListener("input", (event) => {
   state.fileQuery = event.target.value;
   invalidateTransfers();
@@ -943,6 +1280,7 @@ $("settings-browse").addEventListener("click", async () => {
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     $("settings-modal").hidden = true;
+    $("add-modal").hidden = true;
   }
 });
 
@@ -1055,6 +1393,7 @@ async function setupDragDrop() {
   } catch (error) {
     toast(`Daemon unavailable: ${error}`);
   }
+  loadManualPeers();
   await listen("daemon-event", (event) => handleEvent(event.payload));
   // Progress and per-file events arrive in batches to keep one IPC message per tick.
   await listen("daemon-batch", (event) => {
