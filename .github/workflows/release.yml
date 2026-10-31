@@ -25,7 +25,7 @@ jobs:
             name: macos-universal
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: check version
         shell: bash
         run: |
@@ -91,7 +91,7 @@ jobs:
       run:
         working-directory: apps/desktop
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: check version
         shell: bash
         working-directory: .
@@ -173,7 +173,7 @@ jobs:
     container: archlinux:base-devel
     steps:
       - run: pacman -Syu --noconfirm git rust gtk3 webkit2gtk-4.1 libsoup3 hicolor-icon-theme
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: build package
         run: |
           useradd -m builder
