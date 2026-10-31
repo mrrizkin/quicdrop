@@ -1190,11 +1190,14 @@ mod tests {
         }
     }
 
-    fn test_inner() -> Arc<Inner> {
+    fn test_inner() -> (Arc<Inner>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
         let (events, _) = broadcast::channel(512);
         let (shutdown, _) = watch::channel(false);
-        let identity = Arc::new(Identity::load_or_create(None).expect("identity"));
-        Arc::new(Inner {
+        let identity =
+            Arc::new(Identity::load_or_create_in(dir.path().join("cfg"), None).expect("identity"));
+        let trust = TrustStore::at(dir.path().join("trusted.json"));
+        let inner = Arc::new(Inner {
             identity,
             token: "test".into(),
             listen: "127.0.0.1:0".parse().expect("addr"),
@@ -1203,8 +1206,8 @@ mod tests {
             version: API_VERSION.to_string(),
             started_at: 1000,
             local_addrs: vec![],
-            runtime: Arc::new(RuntimeSettings::new(PathBuf::from("/tmp"), Policy::Ask)),
-            trust: TrustStore::default(),
+            runtime: Arc::new(RuntimeSettings::new(dir.path().join("out"), Policy::Ask)),
+            trust,
             peers: Mutex::new(HashMap::new()),
             transfers: Mutex::new(Vec::new()),
             inbound: Mutex::new(HashMap::new()),
@@ -1214,7 +1217,8 @@ mod tests {
             events,
             next_id: AtomicU64::new(1),
             shutdown,
-        })
+        });
+        (inner, dir)
     }
 
     #[test]
@@ -1279,7 +1283,7 @@ mod tests {
 
     #[test]
     fn refreshed_peer_stays() {
-        let inner = test_inner();
+        let (inner, _dir) = test_inner();
         let peer = test_peer("dev1", "Peer 1", "beacon");
 
         inner.remember_peer_at(&peer, 100);
@@ -1302,7 +1306,7 @@ mod tests {
 
     #[tokio::test]
     async fn stale_peer_removed_and_emits_peer_lost() {
-        let inner = test_inner();
+        let (inner, _dir) = test_inner();
         let mut rx = inner.subscribe();
         let peer = test_peer("dev1", "Peer 1", "beacon");
 
@@ -1327,7 +1331,7 @@ mod tests {
 
     #[tokio::test]
     async fn lost_event_removes_peer_and_emits_peer_lost() {
-        let inner = test_inner();
+        let (inner, _dir) = test_inner();
         let mut rx = inner.subscribe();
         let peer = test_peer("dev1", "Peer 1", "mdns");
 
@@ -1350,7 +1354,7 @@ mod tests {
 
     #[test]
     fn mdns_peer_not_expired_by_ttl() {
-        let inner = test_inner();
+        let (inner, _dir) = test_inner();
         let peer = test_peer("dev1", "Peer 1", "mdns");
 
         inner.remember_peer_at(&peer, 100);
@@ -1361,7 +1365,7 @@ mod tests {
 
     #[tokio::test]
     async fn sighting_refreshes_last_seen_without_duplicate_broadcast() {
-        let inner = test_inner();
+        let (inner, _dir) = test_inner();
         let mut rx = inner.subscribe();
         let peer = test_peer("dev1", "Peer 1", "beacon");
 

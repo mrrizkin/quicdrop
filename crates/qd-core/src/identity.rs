@@ -67,7 +67,11 @@ impl Identity {
     }
 
     pub fn load_or_create(name: Option<String>) -> Result<Self> {
-        let dir = Self::config_dir();
+        Self::load_or_create_in(Self::config_dir(), name)
+    }
+
+    pub fn load_or_create_in(dir: impl Into<PathBuf>, name: Option<String>) -> Result<Self> {
+        let dir = dir.into();
         fs::create_dir_all(&dir).with_context(|| format!("create config dir {}", dir.display()))?;
 
         let key_path = dir.join("identity.key");
