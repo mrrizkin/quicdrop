@@ -180,10 +180,57 @@ async fn api_roundtrip() -> Result<()> {
     assert_eq!(transfer["status"], "done", "transfer: {transfer}");
     assert_eq!(transfer["direction"], "out");
     assert_eq!(transfer["transferred"], 17);
+    let duration_ms = transfer["duration_ms"].as_u64().expect("duration_ms");
+    let avg_bps = transfer["avg_bps"].as_u64().expect("avg_bps");
+    assert!(duration_ms >= 1);
+    let expected_bps = 17 * 1000 / duration_ms;
+    assert_eq!(avg_bps, expected_bps);
     assert_eq!(
         std::fs::read(recv_out.join("hello.txt"))?,
         b"driven over http\n"
     );
+
+    // --- 0-byte outbound transfer -----------------------------------------
+    let empty_src = root.path().join("empty.txt");
+    std::fs::write(&empty_src, b"")?;
+    let job: Value = http
+        .post(format!("{base}/api/send"))
+        .bearer_auth("test-token")
+        .json(&json!({
+            "to": format!("127.0.0.1:{recv_port}"),
+            "paths": [empty_src],
+        }))
+        .send()
+        .await?
+        .json()
+        .await?;
+    let empty_id = job["id"].as_str().expect("job id").to_string();
+
+    let mut empty_transfer = Value::Null;
+    for _ in 0..100 {
+        let list: Vec<Value> = http
+            .get(format!("{base}/api/transfers?limit=10"))
+            .bearer_auth("test-token")
+            .send()
+            .await?
+            .json()
+            .await?;
+        if let Some(found) = list.into_iter().find(|t| t["id"] == empty_id.as_str()) {
+            let status = found["status"].as_str().unwrap_or("").to_string();
+            empty_transfer = found;
+            if status != "active" {
+                break;
+            }
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        empty_transfer["status"], "done",
+        "transfer: {empty_transfer}"
+    );
+    assert_eq!(empty_transfer["transferred"], 0);
+    assert!(empty_transfer["duration_ms"].is_number());
+    assert!(empty_transfer["avg_bps"].is_null());
 
     // --- shutdown ---------------------------------------------------------
     http.post(format!("{base}/api/shutdown"))

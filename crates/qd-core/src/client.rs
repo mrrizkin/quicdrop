@@ -45,6 +45,8 @@ pub struct SendOpts {
     pub identity: Option<Arc<Identity>>,
     /// Expanded inputs. Walked here when absent.
     pub sources: Option<Vec<SourceFile>>,
+    /// Optional hook called once the receiver approves the transfer and data begins.
+    pub on_start: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl Default for SendOpts {
@@ -62,6 +64,7 @@ impl Default for SendOpts {
             cancel: None,
             identity: None,
             sources: None,
+            on_start: None,
         }
     }
 }
@@ -80,6 +83,7 @@ impl std::fmt::Debug for SendOpts {
             .field("cancel", &self.cancel.is_some())
             .field("identity", &self.identity.is_some())
             .field("sources", &self.sources.as_ref().map(Vec::len))
+            .field("on_start", &self.on_start.is_some())
             .finish()
     }
 }
@@ -216,6 +220,10 @@ pub async fn send(opts: SendOpts) -> Result<Summary> {
         Frame::Error { message } => bail!("peer error: {message}"),
         other => bail!("unexpected reply: {other:?}"),
     };
+
+    if let Some(on_start) = &opts.on_start {
+        on_start();
+    }
 
     let accepted_total: u64 = accepted
         .iter()

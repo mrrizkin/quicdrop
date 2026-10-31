@@ -14,7 +14,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, oneshot, watch};
 use tracing::{debug, info, warn};
 
@@ -144,6 +144,8 @@ pub struct TransferView {
     pub error: Option<String>,
     pub started_at: u64,
     pub finished_at: Option<u64>,
+    pub duration_ms: Option<u64>,
+    pub avg_bps: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -219,6 +221,7 @@ pub struct Inner {
     pub trust: TrustStore,
     peers: Mutex<HashMap<String, PeerView>>,
     transfers: Mutex<Vec<TransferView>>,
+    transfer_times: Mutex<HashMap<String, Instant>>,
     /// `(peer, session)` to transfer id; a peer can run several transfers.
     inbound: Mutex<HashMap<(String, [u8; 16]), String>>,
     cancels: Mutex<HashMap<String, qd_core::Cancel>>,
@@ -396,6 +399,8 @@ impl Inner {
             error: None,
             started_at: now_secs(),
             finished_at: None,
+            duration_ms: None,
+            avg_bps: None,
         };
         if let Ok(mut transfers) = self.transfers.lock() {
             transfers.push(view.clone());
@@ -411,7 +416,21 @@ impl Inner {
         view.id
     }
 
+    fn mark_transfer_started(&self, id: &str) {
+        if let Ok(mut times) = self.transfer_times.lock() {
+            times.entry(id.to_string()).or_insert_with(Instant::now);
+        }
+    }
+
     fn progress(&self, id: &str, transferred: u64, total: u64) {
+        let live_ms = if transferred > 0 {
+            self.transfer_times.lock().ok().map(|mut times| {
+                let start = times.entry(id.to_string()).or_insert_with(Instant::now);
+                start.elapsed().as_millis() as u64
+            })
+        } else {
+            None
+        };
         let mut found = false;
         if let Ok(mut transfers) = self.transfers.lock() {
             if let Some(t) = transfers.iter_mut().find(|t| t.id == id) {
@@ -420,6 +439,9 @@ impl Inner {
                     t.total_bytes = total;
                 }
                 t.transferred = transferred.max(t.transferred);
+                if let Some(ms) = live_ms {
+                    t.duration_ms = Some(ms);
+                }
                 found = true;
             }
         }
@@ -432,7 +454,20 @@ impl Inner {
         }
     }
 
-    fn finish_transfer(&self, id: &str, status: TransferStatus, error: Option<String>) {
+    fn finish_transfer(
+        &self,
+        id: &str,
+        status: TransferStatus,
+        error: Option<String>,
+        explicit_duration: Option<Duration>,
+    ) {
+        let elapsed = self
+            .transfer_times
+            .lock()
+            .ok()
+            .and_then(|mut times| times.remove(id))
+            .map(|start| start.elapsed());
+        let dur = explicit_duration.or(elapsed);
         let view = {
             let Ok(mut transfers) = self.transfers.lock() else {
                 return;
@@ -440,6 +475,11 @@ impl Inner {
             let Some(transfer) = transfers.iter_mut().find(|t| t.id == id) else {
                 return;
             };
+            if let Some(dur) = dur {
+                let (ms, avg) = qd_core::util::calc_transfer_speed(transfer.transferred, dur);
+                transfer.duration_ms = Some(ms);
+                transfer.avg_bps = avg;
+            }
             // A cancelled transfer stays cancelled; late events must not revive it.
             if transfer.status != TransferStatus::Cancelled {
                 transfer.status = status;
@@ -566,6 +606,7 @@ impl Daemon {
             trust: TrustStore::default(),
             peers: Mutex::new(HashMap::new()),
             transfers: Mutex::new(Vec::new()),
+            transfer_times: Mutex::new(HashMap::new()),
             inbound: Mutex::new(HashMap::new()),
             cancels: Mutex::new(HashMap::new()),
             conns: Mutex::new(HashMap::new()),
@@ -769,6 +810,7 @@ fn server_event_sink(inner: Arc<Inner>) -> ServerEventSink {
                 })
                 .collect();
             let id = inner.start_transfer(Direction::In, &peer_id, &peer_name, files, total_bytes);
+            inner.mark_transfer_started(&id);
             if let Ok(mut inbound) = inner.inbound.lock() {
                 inbound.insert((peer_id.clone(), session), id.clone());
             }
@@ -829,6 +871,7 @@ fn server_event_sink(inner: Arc<Inner>) -> ServerEventSink {
             peer_id,
             session,
             bytes,
+            duration,
             failures,
         } => {
             let id = inner
@@ -857,6 +900,7 @@ fn server_event_sink(inner: Arc<Inner>) -> ServerEventSink {
                     } else {
                         None
                     },
+                    Some(duration),
                 );
             }
         }
@@ -866,7 +910,7 @@ fn server_event_sink(inner: Arc<Inner>) -> ServerEventSink {
             reason,
         } => {
             let id = inner.start_transfer(Direction::In, &peer_id, &peer_name, Vec::new(), 0);
-            inner.finish_transfer(&id, TransferStatus::Declined, Some(reason));
+            inner.finish_transfer(&id, TransferStatus::Declined, Some(reason), None);
         }
     })
 }
@@ -1063,6 +1107,7 @@ pub async fn spawn_send(
                 &transfer_id,
                 TransferStatus::Failed,
                 Some(format!("cannot read input: {error}")),
+                None,
             );
             return;
         }
@@ -1074,6 +1119,7 @@ pub async fn spawn_send(
                     &transfer_id,
                     TransferStatus::Failed,
                     Some(format!("cannot find peer: {e:#}")),
+                    None,
                 );
                 return;
             }
@@ -1100,6 +1146,12 @@ pub async fn spawn_send(
             verdict_state.set_file(&verdict_id, id as usize, None, Some(ok));
         });
 
+        let start_state = state.clone();
+        let start_id = transfer_id.clone();
+        let on_start: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            start_state.mark_transfer_started(&start_id);
+        });
+
         let opts = SendOpts {
             addr,
             device_id,
@@ -1113,6 +1165,7 @@ pub async fn spawn_send(
             cancel: Some(cancel.clone()),
             identity: Some(state.identity.clone()),
             sources: Some(sources),
+            on_start: Some(on_start),
         };
         debug!("sending to {label} at {addr}");
         match client::send(opts).await {
@@ -1139,6 +1192,7 @@ pub async fn spawn_send(
                     } else {
                         None
                     },
+                    Some(summary.duration),
                 );
             }
             Err(e) => {
@@ -1147,7 +1201,7 @@ pub async fn spawn_send(
                 } else {
                     TransferStatus::Failed
                 };
-                state.finish_transfer(&transfer_id, status, Some(format!("{e:#}")));
+                state.finish_transfer(&transfer_id, status, Some(format!("{e:#}")), None);
             }
         }
         if let Ok(mut cancels) = state.cancels.lock() {

@@ -183,6 +183,7 @@ pub enum ServerEvent {
         peer_id: String,
         session: [u8; 16],
         bytes: u64,
+        duration: std::time::Duration,
         failures: usize,
     },
     Declined {
@@ -752,6 +753,7 @@ async fn handle_connection(
             peer_id: sender_id,
             session,
             bytes: transferred,
+            duration: progress.elapsed().max(std::time::Duration::from_millis(1)),
             failures,
         },
     );

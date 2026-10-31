@@ -79,6 +79,19 @@ function fmtEta(seconds) {
   return `${Math.ceil(seconds / 3600)}h left`;
 }
 
+function fmtDuration(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return "";
+  const sec = ms / 1000;
+  if (sec < 60) return `${sec.toFixed(1)} s`;
+  const totalSec = Math.floor(sec);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  if (m < 60) return s > 0 ? `${m}m ${s}s` : `${m}m`;
+  const h = Math.floor(m / 60);
+  const remM = m % 60;
+  return remM > 0 ? `${h}h ${remM}m` : `${h}h`;
+}
+
 /* Throughput samples only advance when bytes do; redraws do not decay the rate. */
 const speedSamples = new Map();
 const RATE_WINDOW_MS = 250;
@@ -367,6 +380,8 @@ function mergeTransferView(current, incoming) {
     files,
     error: incoming.error || current.error,
     finished_at: incoming.finished_at || current.finished_at,
+    duration_ms: incoming.duration_ms != null ? incoming.duration_ms : current.duration_ms,
+    avg_bps: incoming.avg_bps != null ? incoming.avg_bps : current.avg_bps,
   };
 }
 
@@ -712,11 +727,18 @@ function updateTransferView(view, transfer) {
         : `${files[0].name} +${files.length - 1}`;
   const rate = rateFor(transfer);
   const eta = rate > 0 ? fmtEta((total - done) / rate) : "";
+  const isFinished = transfer.status !== "active";
+  const showAvg = isFinished && Boolean(transfer.avg_bps) && transfer.duration_ms != null && done > 0;
+  const bytesDesc = showAvg
+    ? `${fmtBytes(done)} in ${fmtDuration(transfer.duration_ms)}`
+    : `${fmtBytes(done)} / ${fmtBytes(total)}`;
+  const rateDesc = !isFinished && rate > 0 ? fmtRate(rate) : showAvg ? `avg ${fmtRate(transfer.avg_bps)}` : "";
+  const etaDesc = !isFinished ? eta : "";
   const bits = [
     esc(transfer.peer_name),
-    `${fmtBytes(done)} / ${fmtBytes(total)}`,
-    rate > 0 ? fmtRate(rate) : "",
-    eta,
+    bytesDesc,
+    rateDesc,
+    etaDesc,
     timeAgo(transfer.finished_at || transfer.started_at),
   ].filter(Boolean);
   if (transfer.error) bits.push(esc(transfer.error));
