@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 /// ALPN identifier; bumped when the wire format changes incompatibly.
 pub const ALPN: &[u8] = b"quicdrop/1";
 /// Bumped when a frame's shape or meaning changes.
-pub const PROTO_VERSION: u16 = 5;
+pub const PROTO_VERSION: u16 = 6;
 
 pub const DEFAULT_QUIC_PORT: u16 = 53320;
 pub const DEFAULT_DISCOVERY_PORT: u16 = 53321;
@@ -124,13 +124,21 @@ pub struct FileTrailer {
     pub hash: String,
 }
 
-/// Verdict sent back on the same stream once the receiver finished writing.
+/// Answer on the reply direction of a file stream.
+///
+/// A segment is acknowledged as soon as it reaches disk. The verdict covers the
+/// whole file and is sent exactly once, on whichever segment completes the plan.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct FileAck {
-    pub id: u32,
-    pub ok: bool,
-    pub hash: String,
-    pub message: String,
+pub enum FileAck {
+    Segment {
+        id: u32,
+    },
+    Verdict {
+        id: u32,
+        ok: bool,
+        hash: String,
+        message: String,
+    },
 }
 
 pub async fn write_frame(send: &mut quinn::SendStream, frame: &Frame) -> Result<()> {
@@ -241,6 +249,29 @@ mod tests {
         let bytes = postcard::to_stdvec(&frame).unwrap();
         let back: Frame = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(frame, back);
+    }
+
+    #[test]
+    fn file_acks_roundtrip() {
+        for ack in [
+            FileAck::Segment { id: 4 },
+            FileAck::Verdict {
+                id: 4,
+                ok: true,
+                hash: "abc".into(),
+                message: String::new(),
+            },
+            FileAck::Verdict {
+                id: 4,
+                ok: false,
+                hash: String::new(),
+                message: "checksum mismatch".into(),
+            },
+        ] {
+            let bytes = postcard::to_stdvec(&ack).unwrap();
+            let back: FileAck = postcard::from_bytes(&bytes).unwrap();
+            assert_eq!(ack, back);
+        }
     }
 
     #[test]

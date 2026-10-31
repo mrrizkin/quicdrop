@@ -14,7 +14,7 @@ use tracing::{debug, info};
 use crate::cancel::Cancel;
 use crate::hash;
 use crate::identity::Identity;
-use crate::progress::{throttle_file_sink, FileSink, Progress, ProgressSink};
+use crate::progress::{throttle_file_sink, FileSink, FileVerdictSink, Progress, ProgressSink};
 use crate::proto::{self, AcceptFile, FileAck, FileHeader, FileMeta, FileTrailer, Frame};
 use crate::source::SourceFile;
 use crate::util::{human_bytes, human_rate};
@@ -36,6 +36,9 @@ pub struct SendOpts {
     pub progress: Option<ProgressSink>,
     /// Optional per-file progress observer, keyed by `FileMeta::id`.
     pub file_progress: Option<FileSink>,
+    /// Optional per-file verdict observer, called once per file when the receiver
+    /// reports a verdict.
+    pub file_verdict: Option<FileVerdictSink>,
     /// Abort the transfer when signalled.
     pub cancel: Option<Cancel>,
     /// Identity to announce. Read from the config dir when absent.
@@ -55,6 +58,7 @@ impl Default for SendOpts {
             name: None,
             progress: None,
             file_progress: None,
+            file_verdict: None,
             cancel: None,
             identity: None,
             sources: None,
@@ -72,6 +76,7 @@ impl std::fmt::Debug for SendOpts {
             .field("name", &self.name)
             .field("progress", &self.progress.is_some())
             .field("file_progress", &self.file_progress.is_some())
+            .field("file_verdict", &self.file_verdict.is_some())
             .field("cancel", &self.cancel.is_some())
             .field("identity", &self.identity.is_some())
             .field("sources", &self.sources.as_ref().map(Vec::len))
@@ -232,6 +237,7 @@ pub async fn send(opts: SendOpts) -> Result<Summary> {
 
     let semaphore = Arc::new(Semaphore::new(opts.concurrency.max(1)));
     let file_progress = opts.file_progress.clone().map(throttle_file_sink);
+    let file_verdict = opts.file_verdict.clone();
 
     // A one-chunk file costs three round trips whatever its size, so files that
     // fit share a stream. Anything larger keeps its own chunk workers.
@@ -271,6 +277,7 @@ pub async fn send(opts: SendOpts) -> Result<Summary> {
         let conn = conn.clone();
         let progress = progress.clone();
         let file_progress = file_progress.clone();
+        let file_verdict = file_verdict.clone();
         let permit = semaphore.clone();
         tasks.push(tokio::spawn(async move {
             let _permit = permit.acquire_owned().await;
@@ -284,12 +291,21 @@ pub async fn send(opts: SendOpts) -> Result<Summary> {
                         offset,
                         progress.clone(),
                         file_progress.clone(),
+                        file_verdict.clone(),
                     )
                     .await;
                     vec![(meta, offset, result)]
                 }
                 Group::Batch(items) => {
-                    send_batch(&conn, session, &items, progress, file_progress).await
+                    send_batch(
+                        &conn,
+                        session,
+                        &items,
+                        progress,
+                        file_progress,
+                        file_verdict,
+                    )
+                    .await
                 }
             }
         }));
@@ -362,6 +378,7 @@ pub async fn send(opts: SendOpts) -> Result<Summary> {
     Ok(summary)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn send_one(
     conn: &quinn::Connection,
     session: [u8; 16],
@@ -370,6 +387,7 @@ async fn send_one(
     offset: u64,
     progress: Arc<Progress>,
     file_progress: Option<FileSink>,
+    file_verdict: Option<FileVerdictSink>,
 ) -> Result<u64> {
     let started = Instant::now();
     // Every chunk carries the same whole-file digest, so the hash is only needed
@@ -395,6 +413,7 @@ async fn send_one(
             hash_rx.clone(),
             progress.clone(),
             file_progress.clone(),
+            file_verdict.clone(),
         )));
     }
 
@@ -427,6 +446,7 @@ async fn send_worker(
     hash_rx: watch::Receiver<Option<HashState>>,
     progress: Arc<Progress>,
     file_progress: Option<FileSink>,
+    file_verdict: Option<FileVerdictSink>,
 ) -> Result<u64> {
     let mut sent = 0u64;
     loop {
@@ -449,6 +469,7 @@ async fn send_worker(
             &progress,
             &file_progress,
             &file_done,
+            &file_verdict,
         )
         .await?;
     }
@@ -468,6 +489,7 @@ async fn send_chunk(
     progress: &Progress,
     file_progress: &Option<FileSink>,
     file_done: &AtomicU64,
+    file_verdict: &Option<FileVerdictSink>,
 ) -> Result<u64> {
     let (mut send, mut recv) = conn.open_bi().await.context("open file stream")?;
     let (written, hash) = write_unit(
@@ -486,7 +508,11 @@ async fn send_chunk(
     )
     .await?;
     send.finish().context("finish file stream")?;
-    check_ack(&mut recv, &hash).await?;
+    if let Ack::Verdict { ok: false, message } =
+        check_ack(&mut recv, meta.id, &hash, file_verdict).await?
+    {
+        bail!("receiver rejected file: {message}");
+    }
     Ok(written)
 }
 
@@ -590,17 +616,47 @@ async fn write_unit(
     Ok((written, hash))
 }
 
-/// Read the receiver's verdict for the chunk just written.
-async fn check_ack(recv: &mut quinn::RecvStream, hash: &str) -> Result<()> {
+/// What the receiver reported for one stream unit.
+enum Ack {
+    /// The bytes reached disk; the file verdict is still pending.
+    Segment,
+    /// The final answer for the whole file.
+    Verdict { ok: bool, message: String },
+}
+
+/// Read the receiver's answer for the chunk just written.
+async fn check_ack(
+    recv: &mut quinn::RecvStream,
+    id: u32,
+    hash: &str,
+    verdicts: &Option<FileVerdictSink>,
+) -> Result<Ack> {
     let ack: FileAck = proto::read_msg(recv).await.context("read file ack")?;
-    if !ack.ok {
-        bail!("receiver rejected file: {}", ack.message);
+    match ack {
+        FileAck::Segment { id: ack_id } => {
+            if ack_id != id {
+                bail!("ack for file {ack_id} on the stream for {id}");
+            }
+            Ok(Ack::Segment)
+        }
+        FileAck::Verdict {
+            id: ack_id,
+            ok,
+            hash: ack_hash,
+            message,
+        } => {
+            if ack_id != id {
+                bail!("verdict for file {ack_id} on the stream for {id}");
+            }
+            if ok && !ack_hash.is_empty() && ack_hash != hash {
+                bail!("peer computed a different digest");
+            }
+            if let Some(sink) = verdicts {
+                sink(id, ok);
+            }
+            Ok(Ack::Verdict { ok, message })
+        }
     }
-    // Empty hash means "chunk written"; the last chunk carries the file verdict.
-    if !ack.hash.is_empty() && ack.hash != hash {
-        bail!("peer computed a different digest");
-    }
-    Ok(())
 }
 
 /// Send several single-chunk files over one stream, one verdict each.
@@ -610,6 +666,7 @@ async fn send_batch(
     items: &[(PathBuf, FileMeta, u64)],
     progress: Arc<Progress>,
     file_progress: Option<FileSink>,
+    file_verdict: Option<FileVerdictSink>,
 ) -> Vec<(FileMeta, u64, Result<u64>)> {
     let mut results: Vec<(FileMeta, u64, Result<u64>)> = Vec::with_capacity(items.len());
     let (mut send, mut recv) = match conn.open_bi().await {
@@ -658,13 +715,31 @@ async fn send_batch(
     let _ = send.finish();
     for (index, hash) in hashes.iter().enumerate() {
         let Some(hash) = hash else { break };
-        if let Err(e) = check_ack(&mut recv, hash).await {
-            if let Some((_, _, result)) = results.get_mut(index) {
-                if result.is_ok() {
-                    *result = Err(e);
+        let id = items[index].1.id;
+        let result = check_ack(&mut recv, id, hash, &file_verdict).await;
+        match result {
+            Ok(Ack::Verdict { ok: true, .. }) => {}
+            Ok(Ack::Verdict { ok: false, message }) => {
+                // Every body was already written, so the remaining verdicts still
+                // arrive on this stream: a bad file must not fail the others.
+                if let Some((_, _, result)) = results.get_mut(index) {
+                    *result = Err(anyhow!("receiver rejected file: {message}"));
                 }
             }
-            break;
+            Ok(Ack::Segment) => {
+                if let Some((_, _, result)) = results.get_mut(index) {
+                    *result = Err(anyhow!("missing file verdict"));
+                }
+                break;
+            }
+            Err(e) => {
+                if let Some((_, _, result)) = results.get_mut(index) {
+                    if result.is_ok() {
+                        *result = Err(e);
+                    }
+                }
+                break;
+            }
         }
     }
     for (_, meta, offset) in items.iter().skip(results.len()) {

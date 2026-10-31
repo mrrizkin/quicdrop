@@ -988,6 +988,11 @@ pub async fn spawn_send(
         let file_progress: qd_core::FileSink = Arc::new(move |id, done, _| {
             file_state.set_file(&file_id, id as usize, Some(done), None);
         });
+        let verdict_state = state.clone();
+        let verdict_id = transfer_id.clone();
+        let file_verdict: qd_core::FileVerdictSink = Arc::new(move |id, ok| {
+            verdict_state.set_file(&verdict_id, id as usize, None, Some(ok));
+        });
 
         let opts = SendOpts {
             addr,
@@ -998,6 +1003,7 @@ pub async fn spawn_send(
             name: Some(state.identity.name.clone()),
             progress: Some(progress),
             file_progress: Some(file_progress),
+            file_verdict: Some(file_verdict),
             cancel: Some(cancel.clone()),
             identity: Some(state.identity.clone()),
             sources: Some(sources),

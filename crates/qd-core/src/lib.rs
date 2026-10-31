@@ -21,7 +21,7 @@ pub use approval::{ApprovalRequest, ApprovalSender, Decision};
 pub use cancel::Cancel;
 pub use discovery::Peer;
 pub use identity::Identity;
-pub use progress::FileSink;
+pub use progress::{FileSink, FileVerdictSink};
 pub use proto::{
     FileMeta, Frame, ALPN, CHUNK_SIZE, DEFAULT_DISCOVERY_PORT, DEFAULT_QUIC_PORT, PROTO_VERSION,
 };

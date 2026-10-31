@@ -947,7 +947,7 @@ async fn write_segment(
         if verdict.ok {
             let _ = tokio::fs::remove_file(sidecar_path(&planned.dest)).await;
         }
-        send_ack(send, planned.meta.id, &verdict).await;
+        send_verdict(send, planned.meta.id, &verdict).await;
         if let Some(sink) = &opts.events {
             sink(ServerEvent::File {
                 peer_id: peer_id.to_string(),
@@ -969,16 +969,7 @@ async fn write_segment(
     // A written chunk is acknowledged right away; the whole-file verdict arrives on
     // the ack of whichever chunk finishes last. Waiting here would stall the sender,
     // because it only asks for the next chunk after this ack.
-    send_ack(
-        send,
-        planned.meta.id,
-        &Verdict {
-            ok: true,
-            hash: String::new(),
-            message: String::new(),
-        },
-    )
-    .await;
+    send_segment_ack(send, planned.meta.id).await;
     Ok((planned.meta.id, planned.label.clone(), 0, true, false))
 }
 
@@ -1048,8 +1039,12 @@ async fn remember_range(dest: &std::path::Path, start: u64, len: u64) {
     }
 }
 
-async fn send_ack(send: &mut quinn::SendStream, id: u32, verdict: &Verdict) {
-    let ack = FileAck {
+async fn send_segment_ack(send: &mut quinn::SendStream, id: u32) {
+    let _ = proto::write_msg(send, &FileAck::Segment { id }).await;
+}
+
+async fn send_verdict(send: &mut quinn::SendStream, id: u32, verdict: &Verdict) {
+    let ack = FileAck::Verdict {
         id,
         ok: verdict.ok,
         hash: verdict.hash.clone(),

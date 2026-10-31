@@ -8,7 +8,7 @@ use qd_core::server::{serve, start, Policy, ServerOpts};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU16, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use tokio::time::timeout;
 
@@ -82,6 +82,44 @@ async fn folder_tree_roundtrip() -> Result<()> {
 }
 
 #[tokio::test]
+async fn sender_gets_one_verdict_per_file() -> Result<()> {
+    let h = Harness::new(Policy::Auto).await?;
+    let tree = h.root.path().join("src/mixed");
+    std::fs::create_dir_all(&tree)?;
+    std::fs::write(tree.join("a.txt"), b"alpha")?;
+    std::fs::write(tree.join("b.txt"), b"bravo")?;
+    // More than one stream chunk, so this file takes the per-chunk path while the
+    // two small files share a batch stream.
+    std::fs::write(tree.join("big.bin"), vec![7u8; 9 * 1024 * 1024])?;
+
+    let seen: Arc<Mutex<Vec<(u32, bool)>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = seen.clone();
+    let opts = SendOpts {
+        addr: h.addr,
+        files: vec![tree],
+        concurrency: 2,
+        file_verdict: Some(Arc::new(move |id, ok| {
+            sink.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((id, ok));
+        })),
+        ..SendOpts::default()
+    };
+    let summary = timeout(Duration::from_secs(20), client::send(opts)).await??;
+    assert_eq!(summary.ok, 3, "{summary:?}");
+
+    let mut seen = seen.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    seen.sort_unstable();
+    assert_eq!(seen.len(), 3, "exactly one verdict per file: {seen:?}");
+    assert_eq!(
+        seen.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        vec![0, 1, 2]
+    );
+    assert!(seen.iter().all(|(_, ok)| *ok), "{seen:?}");
+    Ok(())
+}
+
+#[tokio::test]
 async fn crafted_traversal_names_stay_inside_out_dir() -> Result<()> {
     let h = Harness::new(Policy::Auto).await?;
 
@@ -142,8 +180,10 @@ async fn crafted_traversal_names_stay_inside_out_dir() -> Result<()> {
         let hash = blake3::hash(payload).to_hex().to_string();
         proto::write_msg(&mut send, &FileTrailer { id, hash }).await?;
         send.finish()?;
-        let ack: proto::FileAck = proto::read_msg(&mut recv).await?;
-        assert!(ack.ok, "{}", ack.message);
+        match proto::read_msg::<proto::FileAck>(&mut recv).await? {
+            proto::FileAck::Verdict { ok: true, .. } => {}
+            other => panic!("expected a passing verdict, got {other:?}"),
+        }
     }
 
     let _ = proto::read_frame(&mut ctrl_recv).await?;

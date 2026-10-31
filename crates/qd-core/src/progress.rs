@@ -16,6 +16,10 @@ pub type ProgressSink = Arc<dyn Fn(u64, u64) + Send + Sync>;
 /// Per-file observer: `(file id, bytes done, file size)`.
 pub type FileSink = Arc<dyn Fn(u32, u64, u64) + Send + Sync>;
 
+/// Per-file verdict observer: `(file id, ok)`. Called once per file when the
+/// receiver's verdict arrives, or not at all when no verdict was received.
+pub type FileVerdictSink = Arc<dyn Fn(u32, bool) + Send + Sync>;
+
 /// Minimum interval between per-file progress updates.
 pub const FILE_PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 
