@@ -134,6 +134,8 @@ pub enum ServerEvent {
     /// A sender was accepted and the transfer is about to start.
     Session {
         peer_id: String,
+        /// Sender's offer id; a peer can have several in flight.
+        session: [u8; 16],
         peer_name: String,
         files: Vec<FileMeta>,
         total_bytes: u64,
@@ -142,12 +144,14 @@ pub enum ServerEvent {
     },
     Progress {
         peer_id: String,
+        session: [u8; 16],
         done: u64,
         total: u64,
     },
     /// A file stream was planned; `size` is the full file size.
     FileStart {
         peer_id: String,
+        session: [u8; 16],
         id: u32,
         name: String,
         size: u64,
@@ -155,6 +159,7 @@ pub enum ServerEvent {
     /// Bytes written for one file, including a resumed prefix.
     FileProgress {
         peer_id: String,
+        session: [u8; 16],
         id: u32,
         name: String,
         done: u64,
@@ -162,6 +167,7 @@ pub enum ServerEvent {
     },
     File {
         peer_id: String,
+        session: [u8; 16],
         id: u32,
         name: String,
         bytes: u64,
@@ -169,6 +175,7 @@ pub enum ServerEvent {
     },
     Done {
         peer_id: String,
+        session: [u8; 16],
         bytes: u64,
         failures: usize,
     },
@@ -198,6 +205,7 @@ fn emit_file_progress(planned: &PlannedFile, peer_id: &str, done: u64, size: u64
     }
     sink(ServerEvent::FileProgress {
         peer_id: peer_id.to_string(),
+        session: planned.session,
         id: planned.meta.id,
         name: planned.label.clone(),
         done,
@@ -332,6 +340,7 @@ pub async fn accept_loop(
 }
 
 struct PlannedFile {
+    session: [u8; 16],
     meta: FileMeta,
     dest: PathBuf,
     /// Safe relative name shown to the user and in events.
@@ -549,6 +558,7 @@ async fn handle_connection(
         });
         let count = proto::chunk_count(offset, meta.size);
         plan.push(PlannedFile {
+            session,
             meta,
             dest,
             label,
@@ -574,6 +584,7 @@ async fn handle_connection(
                 (
                     p.meta.id,
                     Arc::new(PlannedFile {
+                        session: p.session,
                         meta: p.meta.clone(),
                         dest: p.dest.clone(),
                         label: p.label.clone(),
@@ -595,6 +606,7 @@ async fn handle_connection(
                 Arc::new(move |done, total| {
                     sink(ServerEvent::Progress {
                         peer_id: peer_id.clone(),
+                        session,
                         done,
                         total,
                     })
@@ -607,6 +619,7 @@ async fn handle_connection(
         &opts,
         ServerEvent::Session {
             peer_id: sender_id.clone(),
+            session,
             peer_name: sender_name.clone(),
             files: plan.iter().map(|p| p.meta.clone()).collect(),
             total_bytes: total,
@@ -618,6 +631,7 @@ async fn handle_connection(
             &opts,
             ServerEvent::FileStart {
                 peer_id: sender_id.clone(),
+                session,
                 id: planned.meta.id,
                 name: planned.label.clone(),
                 size: planned.meta.size,
@@ -652,6 +666,7 @@ async fn handle_connection(
                                 &opts,
                                 ServerEvent::File {
                                     peer_id: sender_id.clone(),
+                                    session,
                                     id,
                                     name,
                                     bytes,
@@ -731,6 +746,7 @@ async fn handle_connection(
         &opts,
         ServerEvent::Done {
             peer_id: sender_id,
+            session,
             bytes: transferred,
             failures,
         },
@@ -951,6 +967,7 @@ async fn write_segment(
         if let Some(sink) = &opts.events {
             sink(ServerEvent::File {
                 peer_id: peer_id.to_string(),
+                session: planned.session,
                 id: planned.meta.id,
                 name: planned.label.clone(),
                 bytes: expected.saturating_sub(offset),

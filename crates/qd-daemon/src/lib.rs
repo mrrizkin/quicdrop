@@ -211,7 +211,8 @@ pub struct Inner {
     pub trust: TrustStore,
     peers: Mutex<HashMap<String, PeerView>>,
     transfers: Mutex<Vec<TransferView>>,
-    inbound: Mutex<HashMap<String, String>>,
+    /// `(peer, session)` to transfer id; a peer can run several transfers.
+    inbound: Mutex<HashMap<(String, [u8; 16]), String>>,
     cancels: Mutex<HashMap<String, qd_core::Cancel>>,
     conns: Mutex<HashMap<String, qd_core::quinn::Connection>>,
     approvals: Mutex<HashMap<String, (ApprovalView, oneshot::Sender<Decision>)>>,
@@ -394,11 +395,11 @@ impl Inner {
         self.shutdown.send(true).is_ok()
     }
 
-    fn transfer_id(&self, peer_id: &str) -> Option<String> {
+    fn transfer_id(&self, peer_id: &str, session: [u8; 16]) -> Option<String> {
         self.inbound
             .lock()
             .ok()
-            .and_then(|map| map.get(peer_id).cloned())
+            .and_then(|map| map.get(&(peer_id.to_string(), session)).cloned())
     }
 
     /// Update one file inside a transfer and publish it.
@@ -671,6 +672,7 @@ fn server_event_sink(inner: Arc<Inner>) -> ServerEventSink {
     Arc::new(move |event| match event {
         ServerEvent::Session {
             peer_id,
+            session,
             peer_name,
             files,
             total_bytes,
@@ -687,7 +689,7 @@ fn server_event_sink(inner: Arc<Inner>) -> ServerEventSink {
                 .collect();
             let id = inner.start_transfer(Direction::In, &peer_id, &peer_name, files, total_bytes);
             if let Ok(mut inbound) = inner.inbound.lock() {
-                inbound.insert(peer_id.clone(), id.clone());
+                inbound.insert((peer_id.clone(), session), id.clone());
             }
             if let Ok(mut conns) = inner.conns.lock() {
                 conns.insert(id, conn);
@@ -695,43 +697,42 @@ fn server_event_sink(inner: Arc<Inner>) -> ServerEventSink {
         }
         ServerEvent::Progress {
             peer_id,
+            session,
             done,
             total,
         } => {
-            let id = inner
-                .inbound
-                .lock()
-                .ok()
-                .and_then(|map| map.get(&peer_id).cloned());
-            if let Some(id) = id {
+            if let Some(id) = inner.transfer_id(&peer_id, session) {
                 inner.progress(&id, done, total);
             }
         }
         ServerEvent::FileStart {
             peer_id,
+            session,
             id,
             name,
             size,
         } => {
             debug!("receiving {name} ({size} bytes) from {peer_id}");
-            if let Some(transfer) = inner.transfer_id(&peer_id) {
+            if let Some(transfer) = inner.transfer_id(&peer_id, session) {
                 inner.set_file(&transfer, id as usize, Some(0), None);
             }
         }
         ServerEvent::FileProgress {
             peer_id,
+            session,
             id,
             name,
             done,
             size,
         } => {
             let _ = (name, size);
-            if let Some(transfer) = inner.transfer_id(&peer_id) {
+            if let Some(transfer) = inner.transfer_id(&peer_id, session) {
                 inner.set_file(&transfer, id as usize, Some(done), None);
             }
         }
         ServerEvent::File {
             peer_id,
+            session,
             name,
             id,
             bytes,
@@ -741,12 +742,13 @@ fn server_event_sink(inner: Arc<Inner>) -> ServerEventSink {
                 "received {name} ({bytes} bytes) from {peer_id}: {}",
                 if ok { "ok" } else { "failed" }
             );
-            if let Some(transfer) = inner.transfer_id(&peer_id) {
+            if let Some(transfer) = inner.transfer_id(&peer_id, session) {
                 inner.set_file(&transfer, id as usize, None, Some(ok));
             }
         }
         ServerEvent::Done {
             peer_id,
+            session,
             bytes,
             failures,
         } => {
@@ -754,7 +756,7 @@ fn server_event_sink(inner: Arc<Inner>) -> ServerEventSink {
                 .inbound
                 .lock()
                 .ok()
-                .and_then(|mut map| map.remove(&peer_id));
+                .and_then(|mut map| map.remove(&(peer_id.clone(), session)));
             if let Some(id) = id {
                 if let Ok(mut conns) = inner.conns.lock() {
                     conns.remove(&id);

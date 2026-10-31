@@ -1274,6 +1274,7 @@ version = "2026.44.10"
 dependencies = [
  "anyhow",
  "axum",
+ "blake3",
  "clap",
  "dirs",
  "getrandom 0.4.3",
