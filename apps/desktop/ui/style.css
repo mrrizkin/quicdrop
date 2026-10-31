@@ -307,6 +307,28 @@ select {
   flex: 0 1 auto;
 }
 
+.peer-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 6px 3px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-3);
+  user-select: none;
+}
+
+.peer-section-head:first-child {
+  padding-top: 2px;
+}
+
+.peer-section-head .count {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-3);
+}
+
 .peer {
   display: flex;
   align-items: center;
@@ -432,6 +454,17 @@ select {
   font-size: 10px;
   color: var(--text-3);
   letter-spacing: 0.02em;
+}
+
+.peer-route {
+  flex: none;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-3);
+  letter-spacing: 0.02em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .peer.selected .peer-label {
@@ -1355,6 +1388,10 @@ select.input {
 
 [data-density="compact"] .peer {
   padding-block: 4px;
+}
+
+[data-density="compact"] .peer-section-head {
+  padding-block: 4px 2px;
 }
 
 [data-density="compact"] .transfer {
