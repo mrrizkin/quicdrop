@@ -1,6 +1,7 @@
 # quicdrop
 
-Peer-to-peer file transfer on your local network, over QUIC instead of HTTP.
+Peer-to-peer file transfer over QUIC. Devices on the same link discover each other;
+elsewhere, send by hostname or address.
 
 ```
 $ qd receive
@@ -36,8 +37,8 @@ Prebuilt, from the [releases page](https://github.com/mrrizkin/quicdrop/releases
 | `quicdrop-desktop-<version>-x64-setup.exe`, `-universal.dmg` | desktop app only; use the tarball for `qd` |
 | `quicdrop-<version>.flatpak` | desktop app, plus `qd` and `quicdropd` |
 
-Arch and derivatives: `quicdrop-bin` (prebuilt) or `quicdrop` (built from source),
-both from the AUR.
+Arch and derivatives: AUR recipes for `quicdrop-bin` (prebuilt) and `quicdrop` (built
+from source) live under `packaging/aur`.
 
 ## Usage
 

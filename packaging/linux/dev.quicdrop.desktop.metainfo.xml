@@ -7,10 +7,10 @@
   <project_license>MIT</project_license>
   <description>
     <p>
-      QuicDrop sends files and folders to other devices on the same network without a
-      server. Every file travels on its own QUIC stream, so many small files move in
-      parallel, a lossy link only stalls one file, and an interrupted transfer resumes
-      from where it stopped.
+      QuicDrop sends files and folders to other devices without a server. Devices on the
+      same link find each other; elsewhere, address them by hostname or IP. Every file
+      travels on its own QUIC stream, so many small files move in parallel, a lossy link
+      only stalls one file, and an interrupted transfer resumes from where it stopped.
     </p>
   </description>
   <launchable type="desktop-id">dev.quicdrop.desktop</launchable>

@@ -2,7 +2,7 @@
 Type=Application
 Name=QuicDrop
 GenericName=File Transfer
-Comment=Send files and folders over the local network
+Comment=Send files and folders over QUIC
 Exec=quicdrop-desktop
 Icon=dev.quicdrop.desktop
 Terminal=false
