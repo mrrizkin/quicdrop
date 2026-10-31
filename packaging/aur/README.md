@@ -29,6 +29,9 @@ The same for `quicdrop`.
 
 ## Updates
 
+`just tag` stamps `packaging/arch/PKGBUILD`; these AUR recipes are updated after the
+release assets exist, because their checksums come from published artifacts.
+
 ```bash
 updpkgsums                      # rewrites sha256sums from the sources
 makepkg --printsrcinfo > .SRCINFO
