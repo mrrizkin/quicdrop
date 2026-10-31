@@ -299,6 +299,16 @@ function filePhase(file) {
   return (file.done || 0) > 0 ? "active" : "queue";
 }
 
+/* Files still moving rank before byte-complete files awaiting verification. */
+function fileRank(file) {
+  if (file.ok === true || file.ok === false) return 2;
+  return file.size > 0 && (file.done || 0) >= file.size ? 1 : 0;
+}
+
+function sortFileIndices(files, indices) {
+  return [...indices].sort((a, b) => fileRank(files[a]) - fileRank(files[b]) || a - b);
+}
+
 function filePhases(transfer) {
   const counts = { active: 0, queue: 0, done: 0, failed: 0 };
   (transfer.files || []).forEach((file) => {
@@ -558,10 +568,12 @@ function transferStatus(transfer) {
 }
 
 function filesKey(transfer) {
+  const files = transfer.files || [];
   const folder = folderRoot(transfer);
-  const phases = folder ? (transfer.files || []).map(filePhase).join("") : "";
+  const phases = folder ? files.map(filePhase).join("") : "";
+  const ranks = files.map(fileRank).join("");
   const open = folder ? [...openPhasesFor(transfer)].sort().join(",") : "";
-  return `${(transfer.files || []).length}|${state.fileQuery}|${expandedFiles.has(transfer.id) ? "all" : "part"}|${phases}|${open}`;
+  return `${files.length}|${state.fileQuery}|${expandedFiles.has(transfer.id) ? "all" : "part"}|${phases}|${ranks}|${open}`;
 }
 
 /* Peers and trust change on every beacon; rebuild their lists at most once a frame. */
@@ -784,7 +796,8 @@ function rebuildFileRows(view, transfer) {
   }
 
   if (!folder) {
-    matches.slice(0, limit).forEach((index) => {
+    const ordered = sortFileIndices(files, matches);
+    ordered.slice(0, limit).forEach((index) => {
       const row = createFileRow(index, files[index]);
       view.fileNodes.set(index, row);
       view.files.appendChild(row.el);
@@ -795,8 +808,8 @@ function rebuildFileRows(view, transfer) {
       empty.className = "file-more";
       empty.textContent = "No file matches.";
       view.files.appendChild(empty);
-    } else if (matches.length > limit) {
-      view.files.appendChild(fileMore(transfer, matches.length - limit, expanded));
+    } else if (ordered.length > limit) {
+      view.files.appendChild(fileMore(transfer, ordered.length - limit, expanded));
     }
     view.filesKey = filesKey(transfer);
     return;
@@ -808,7 +821,7 @@ function rebuildFileRows(view, transfer) {
   matches.forEach((index) => byPhase[filePhase(files[index])].push(index));
 
   FILE_PHASES.forEach((phase) => {
-    const indices = byPhase[phase];
+    const indices = sortFileIndices(files, byPhase[phase]);
     if (indices.length === 0) return;
     const isOpen = searching || open.has(phase);
     const head = document.createElement("li");
