@@ -21,30 +21,22 @@ pub fn human_rate(bytes_per_sec: f64) -> String {
     format!("{}/s", human_bytes(bytes_per_sec as u64))
 }
 
-/// Compute average throughput in bytes per second given transferred bytes and duration in milliseconds.
-///
-/// Clamps duration to >= 1 ms when `bytes > 0` to prevent division by zero.
-/// Returns `None` when `bytes == 0`.
-pub fn calc_avg_bps(bytes: u64, duration_ms: u64) -> Option<u64> {
-    if bytes == 0 {
-        return None;
-    }
-    let ms = duration_ms.max(1);
-    let avg = ((bytes as u128 * 1000) / (ms as u128)) as u64;
-    Some(avg)
-}
-
 /// Compute transfer duration in milliseconds and average rate in bytes per second.
 ///
-/// Duration is clamped to >= 1 ms when `bytes > 0` to prevent division by zero or inflated rates.
-/// `avg_bps` is `None` when `bytes == 0`.
+/// Clamps duration to >= 1 ms when `bytes > 0` to prevent division by zero.
+/// Returns `None` for rate when `bytes == 0`.
 pub fn calc_transfer_speed(bytes: u64, duration: std::time::Duration) -> (u64, Option<u64>) {
     let ms = if bytes > 0 {
         (duration.as_millis() as u64).max(1)
     } else {
         duration.as_millis() as u64
     };
-    (ms, calc_avg_bps(bytes, ms))
+    let avg = if bytes == 0 {
+        None
+    } else {
+        Some(((bytes as u128 * 1000) / (ms as u128)) as u64)
+    };
+    (ms, avg)
 }
 
 /// Default receive directory: `~/Downloads/QuicDrop`.

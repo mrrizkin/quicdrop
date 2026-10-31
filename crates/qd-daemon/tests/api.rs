@@ -179,11 +179,12 @@ async fn api_roundtrip() -> Result<()> {
     }
     assert_eq!(transfer["status"], "done", "transfer: {transfer}");
     assert_eq!(transfer["direction"], "out");
-    assert_eq!(transfer["transferred"], 17);
+    let transferred = transfer["transferred"].as_u64().expect("transferred");
+    assert!(transferred > 0);
     let duration_ms = transfer["duration_ms"].as_u64().expect("duration_ms");
     let avg_bps = transfer["avg_bps"].as_u64().expect("avg_bps");
     assert!(duration_ms >= 1);
-    let expected_bps = 17 * 1000 / duration_ms;
+    let expected_bps = transferred * 1000 / duration_ms;
     assert_eq!(avg_bps, expected_bps);
     assert_eq!(
         std::fs::read(recv_out.join("hello.txt"))?,

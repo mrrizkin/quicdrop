@@ -423,26 +423,29 @@ impl Inner {
     }
 
     fn progress(&self, id: &str, transferred: u64, total: u64) {
-        let live_ms = if transferred > 0 {
-            self.transfer_times.lock().ok().map(|mut times| {
-                let start = times.entry(id.to_string()).or_insert_with(Instant::now);
-                start.elapsed().as_millis() as u64
-            })
-        } else {
+        let live_ms = if transferred == 0 {
             None
+        } else {
+            self.transfer_times.lock().ok().and_then(|times| {
+                times
+                    .get(id)
+                    .map(|start| start.elapsed().as_millis() as u64)
+            })
         };
         let mut found = false;
         if let Ok(mut transfers) = self.transfers.lock() {
             if let Some(t) = transfers.iter_mut().find(|t| t.id == id) {
-                // Resume can lower the accepted total; it is authoritative once sending starts.
-                if total > 0 {
-                    t.total_bytes = total;
+                if t.status == TransferStatus::Active {
+                    // Resume can lower the accepted total; it is authoritative once sending starts.
+                    if total > 0 {
+                        t.total_bytes = total;
+                    }
+                    t.transferred = transferred.max(t.transferred);
+                    if let Some(ms) = live_ms {
+                        t.duration_ms = Some(ms);
+                    }
+                    found = true;
                 }
-                t.transferred = transferred.max(t.transferred);
-                if let Some(ms) = live_ms {
-                    t.duration_ms = Some(ms);
-                }
-                found = true;
             }
         }
         if found {
@@ -475,10 +478,13 @@ impl Inner {
             let Some(transfer) = transfers.iter_mut().find(|t| t.id == id) else {
                 return;
             };
-            if let Some(dur) = dur {
-                let (ms, avg) = qd_core::util::calc_transfer_speed(transfer.transferred, dur);
-                transfer.duration_ms = Some(ms);
-                transfer.avg_bps = avg;
+            // Keep the first terminal timing.
+            if transfer.status == TransferStatus::Active {
+                if let Some(dur) = dur {
+                    let (ms, avg) = qd_core::util::calc_transfer_speed(transfer.transferred, dur);
+                    transfer.duration_ms = Some(ms);
+                    transfer.avg_bps = avg;
+                }
             }
             // A cancelled transfer stays cancelled; late events must not revive it.
             if transfer.status != TransferStatus::Cancelled {
@@ -487,7 +493,9 @@ impl Inner {
                     transfer.error = error;
                 }
             }
-            transfer.finished_at = Some(now_secs());
+            if transfer.finished_at.is_none() {
+                transfer.finished_at = Some(now_secs());
+            }
             transfer.clone()
         };
         self.broadcast(DaemonEvent::Session { transfer: view });
@@ -1267,6 +1275,7 @@ mod tests {
             trust,
             peers: Mutex::new(HashMap::new()),
             transfers: Mutex::new(Vec::new()),
+            transfer_times: Mutex::new(HashMap::new()),
             inbound: Mutex::new(HashMap::new()),
             cancels: Mutex::new(HashMap::new()),
             conns: Mutex::new(HashMap::new()),
@@ -1436,5 +1445,104 @@ mod tests {
 
         // No new event broadcast
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn late_progress_after_done_does_not_leak_or_rewrite_timing() {
+        let (inner, _dir) = test_inner();
+        let id = inner.start_transfer(Direction::Out, "peer-1", "Peer 1", Vec::new(), 1000);
+        inner.mark_transfer_started(&id);
+        inner.progress(&id, 500, 1000);
+        inner.finish_transfer(
+            &id,
+            TransferStatus::Done,
+            None,
+            Some(Duration::from_millis(250)),
+        );
+
+        let transfer = inner.transfers(1).into_iter().next().unwrap();
+        assert_eq!(transfer.status, TransferStatus::Done);
+        assert_eq!(transfer.duration_ms, Some(250));
+        assert_eq!(transfer.avg_bps, Some(500 * 1000 / 250));
+        assert!(inner.transfer_times.lock().unwrap().get(&id).is_none());
+
+        // Late progress after Done must not re-insert into transfer_times or alter timing.
+        inner.progress(&id, 800, 1000);
+        assert!(inner.transfer_times.lock().unwrap().get(&id).is_none());
+        let transfer_after = inner.transfers(1).into_iter().next().unwrap();
+        assert_eq!(transfer_after.duration_ms, Some(250));
+        assert_eq!(transfer_after.avg_bps, Some(500 * 1000 / 250));
+        assert_eq!(transfer_after.transferred, 500);
+    }
+
+    #[test]
+    fn cancelled_transfer_keeps_first_timing() {
+        let (inner, _dir) = test_inner();
+        let id = inner.start_transfer(Direction::In, "peer-2", "Peer 2", Vec::new(), 2000);
+        inner.mark_transfer_started(&id);
+        inner.progress(&id, 400, 2000);
+        inner.finish_transfer(
+            &id,
+            TransferStatus::Cancelled,
+            None,
+            Some(Duration::from_millis(200)),
+        );
+
+        let transfer = inner.transfers(1).into_iter().next().unwrap();
+        assert_eq!(transfer.status, TransferStatus::Cancelled);
+        assert_eq!(transfer.duration_ms, Some(200));
+        assert_eq!(transfer.avg_bps, Some(400 * 1000 / 200));
+
+        // Late finish event after cancellation must not overwrite status or timing.
+        inner.finish_transfer(
+            &id,
+            TransferStatus::Done,
+            None,
+            Some(Duration::from_millis(800)),
+        );
+        let transfer_after = inner.transfers(1).into_iter().next().unwrap();
+        assert_eq!(transfer_after.status, TransferStatus::Cancelled);
+        assert_eq!(transfer_after.duration_ms, Some(200));
+        assert_eq!(transfer_after.avg_bps, Some(400 * 1000 / 200));
+    }
+
+    #[test]
+    fn failed_transfer_records_partial_timing_and_no_avg_if_empty() {
+        let (inner, _dir) = test_inner();
+        // Failed with bytes transferred
+        let id1 = inner.start_transfer(Direction::Out, "peer-3", "Peer 3", Vec::new(), 1000);
+        inner.mark_transfer_started(&id1);
+        inner.progress(&id1, 200, 1000);
+        inner.finish_transfer(
+            &id1,
+            TransferStatus::Failed,
+            Some("io error".into()),
+            Some(Duration::from_millis(100)),
+        );
+        let t1 = inner
+            .transfers(10)
+            .into_iter()
+            .find(|t| t.id == id1)
+            .unwrap();
+        assert_eq!(t1.status, TransferStatus::Failed);
+        assert_eq!(t1.duration_ms, Some(100));
+        assert_eq!(t1.avg_bps, Some(200 * 1000 / 100));
+
+        // Failed with 0 bytes transferred
+        let id2 = inner.start_transfer(Direction::Out, "peer-4", "Peer 4", Vec::new(), 1000);
+        inner.finish_transfer(
+            &id2,
+            TransferStatus::Failed,
+            Some("connect failed".into()),
+            Some(Duration::from_millis(50)),
+        );
+        let t2 = inner
+            .transfers(10)
+            .into_iter()
+            .find(|t| t.id == id2)
+            .unwrap();
+        assert_eq!(t2.status, TransferStatus::Failed);
+        assert_eq!(t2.duration_ms, Some(50));
+        assert_eq!(t2.avg_bps, None);
     }
 }

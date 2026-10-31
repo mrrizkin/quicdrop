@@ -82,8 +82,8 @@ function fmtEta(seconds) {
 function fmtDuration(ms) {
   if (!Number.isFinite(ms) || ms < 0) return "";
   const sec = ms / 1000;
-  if (sec < 60) return `${sec.toFixed(1)} s`;
-  const totalSec = Math.floor(sec);
+  if (sec < 59.95) return `${sec.toFixed(1)} s`;
+  const totalSec = Math.round(sec);
   const m = Math.floor(totalSec / 60);
   const s = totalSec % 60;
   if (m < 60) return s > 0 ? `${m}m ${s}s` : `${m}m`;
@@ -372,16 +372,17 @@ function mergeTransferView(current, incoming) {
     current.transferred > 0 && current.total_bytes > 0
       ? current.total_bytes
       : incoming.total_bytes || current.total_bytes || 0;
+  const settled = TERMINAL_STATUS.has(current.status);
   return {
     ...incoming,
-    status: TERMINAL_STATUS.has(current.status) ? current.status : incoming.status,
+    status: settled ? current.status : incoming.status,
     transferred: Math.max(current.transferred || 0, incoming.transferred || 0),
     total_bytes: total,
     files,
     error: incoming.error || current.error,
     finished_at: incoming.finished_at || current.finished_at,
-    duration_ms: incoming.duration_ms != null ? incoming.duration_ms : current.duration_ms,
-    avg_bps: incoming.avg_bps != null ? incoming.avg_bps : current.avg_bps,
+    duration_ms: settled ? current.duration_ms : (incoming.duration_ms ?? current.duration_ms),
+    avg_bps: settled ? current.avg_bps : (incoming.avg_bps ?? current.avg_bps),
   };
 }
 
@@ -727,13 +728,21 @@ function updateTransferView(view, transfer) {
         : `${files[0].name} +${files.length - 1}`;
   const rate = rateFor(transfer);
   const eta = rate > 0 ? fmtEta((total - done) / rate) : "";
-  const isFinished = transfer.status !== "active";
-  const showAvg = isFinished && Boolean(transfer.avg_bps) && transfer.duration_ms != null && done > 0;
+  const showAvg =
+    transfer.status === "done" &&
+    transfer.avg_bps != null &&
+    transfer.duration_ms != null &&
+    done > 0;
   const bytesDesc = showAvg
     ? `${fmtBytes(done)} in ${fmtDuration(transfer.duration_ms)}`
     : `${fmtBytes(done)} / ${fmtBytes(total)}`;
-  const rateDesc = !isFinished && rate > 0 ? fmtRate(rate) : showAvg ? `avg ${fmtRate(transfer.avg_bps)}` : "";
-  const etaDesc = !isFinished ? eta : "";
+  const rateDesc =
+    transfer.status === "active" && rate > 0
+      ? fmtRate(rate)
+      : showAvg
+        ? `avg ${fmtRate(transfer.avg_bps)}`
+        : "";
+  const etaDesc = transfer.status === "active" ? eta : "";
   const bits = [
     esc(transfer.peer_name),
     bytesDesc,

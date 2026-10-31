@@ -46,6 +46,7 @@ pub struct SendOpts {
     /// Expanded inputs. Walked here when absent.
     pub sources: Option<Vec<SourceFile>>,
     /// Optional hook called once the receiver approves the transfer and data begins.
+    /// Runs synchronously on the send task; must not block.
     pub on_start: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 

@@ -725,7 +725,8 @@ async fn handle_connection(
     .await;
     reporter_handle.abort();
 
-    let secs = progress.elapsed().as_secs_f64().max(0.001);
+    let elapsed = progress.elapsed();
+    let secs = elapsed.as_secs_f64().max(0.001);
     println!(
         "done: {} in {:.1}s ({}){}",
         human_bytes(transferred),
@@ -753,7 +754,7 @@ async fn handle_connection(
             peer_id: sender_id,
             session,
             bytes: transferred,
-            duration: progress.elapsed().max(std::time::Duration::from_millis(1)),
+            duration: elapsed.max(std::time::Duration::from_millis(1)),
             failures,
         },
     );
