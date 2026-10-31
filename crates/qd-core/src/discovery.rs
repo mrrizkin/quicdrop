@@ -15,7 +15,24 @@ use tracing::{debug, info, trace, warn};
 use crate::identity::Identity;
 use crate::proto::{BROADCAST_MAGIC, MDNS_SERVICE, MULTICAST_GROUP, PROTO_VERSION};
 
-const BEACON_INTERVAL: Duration = Duration::from_secs(3);
+pub const BEACON_INTERVAL: Duration = Duration::from_secs(3);
+pub const PEER_TTL: Duration = Duration::from_secs(12);
+
+/// Peers discovered only via mDNS are not expired by TTL alone, as mDNS re-announces
+/// rarely; they rely on mDNS `ServiceRemoved` instead.
+pub fn is_stale(source: &str, last_seen_secs: u64, now_secs: u64, ttl_secs: u64) -> bool {
+    if source == "mdns" {
+        false
+    } else {
+        now_secs.saturating_sub(last_seen_secs) >= ttl_secs
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum DiscoveryEvent {
+    Seen(Peer),
+    Lost { device_id: String },
+}
 
 #[derive(Debug, Clone)]
 pub struct Peer {
@@ -58,7 +75,7 @@ struct Beacon {
 }
 
 pub struct Discovery {
-    pub peers: mpsc::UnboundedReceiver<Peer>,
+    pub events: mpsc::UnboundedReceiver<DiscoveryEvent>,
     pub local_addrs: Vec<IpAddr>,
     daemon: ServiceDaemon,
 }
@@ -77,7 +94,7 @@ pub async fn start(
     disc_port: u16,
     advertise: bool,
 ) -> Result<Discovery> {
-    let (tx, rx) = mpsc::unbounded_channel::<Peer>();
+    let (tx, rx) = mpsc::unbounded_channel::<DiscoveryEvent>();
     let local_addrs = local_ipv4_addrs_async().await;
     let primary = local_addrs
         .iter()
@@ -112,46 +129,63 @@ pub async fn start(
         std::thread::Builder::new()
             .name("qd-mdns".into())
             .spawn(move || {
+                let mut fullname_to_device: HashMap<String, String> = HashMap::new();
                 while let Ok(event) = browse.recv() {
-                    if let ServiceEvent::ServiceResolved(info) = event {
-                        let device_id = info
-                            .txt_properties
-                            .get_property_val_str("id")
-                            .unwrap_or_default()
-                            .to_string();
-                        if device_id.is_empty() || device_id == me {
-                            continue;
-                        }
-                        let name = info
-                            .txt_properties
-                            .get_property_val_str("name")
-                            .unwrap_or("unknown")
-                            .to_string();
-                        let platform = info
-                            .txt_properties
-                            .get_property_val_str("platform")
-                            .unwrap_or("unknown")
-                            .to_string();
-                        let addrs: Vec<SocketAddr> = info
-                            .addresses
-                            .iter()
-                            .map(|a| SocketAddr::new(a.to_ip_addr(), info.port))
-                            .collect();
-                        for addr in addrs {
-                            let peer = Peer {
-                                device_id: device_id.clone(),
-                                name: name.clone(),
-                                platform: platform.clone(),
-                                quic_port: info.port,
-                                addr,
-                                source: "mdns",
-                                last_seen: Instant::now(),
-                            };
-                            trace!("mdns peer {peer}");
-                            if tx.send(peer).is_err() {
-                                return;
+                    match event {
+                        ServiceEvent::ServiceResolved(info) => {
+                            let device_id = info
+                                .txt_properties
+                                .get_property_val_str("id")
+                                .unwrap_or_default()
+                                .to_string();
+                            if device_id.is_empty() || device_id == me {
+                                continue;
+                            }
+                            let fullname = info.get_fullname().to_string();
+                            fullname_to_device.insert(fullname, device_id.clone());
+
+                            let name = info
+                                .txt_properties
+                                .get_property_val_str("name")
+                                .unwrap_or("unknown")
+                                .to_string();
+                            let platform = info
+                                .txt_properties
+                                .get_property_val_str("platform")
+                                .unwrap_or("unknown")
+                                .to_string();
+                            let addrs: Vec<SocketAddr> = info
+                                .addresses
+                                .iter()
+                                .map(|a| SocketAddr::new(a.to_ip_addr(), info.port))
+                                .collect();
+                            for addr in addrs {
+                                let peer = Peer {
+                                    device_id: device_id.clone(),
+                                    name: name.clone(),
+                                    platform: platform.clone(),
+                                    quic_port: info.port,
+                                    addr,
+                                    source: "mdns",
+                                    last_seen: Instant::now(),
+                                };
+                                trace!("mdns peer {peer}");
+                                if tx.send(DiscoveryEvent::Seen(peer)).is_err() {
+                                    return;
+                                }
                             }
                         }
+                        ServiceEvent::ServiceRemoved(_service_type, fullname) => {
+                            if let Some(device_id) = fullname_to_device.remove(&fullname) {
+                                if !fullname_to_device.values().any(|id| id == &device_id) {
+                                    trace!("mdns service removed for device {device_id}");
+                                    if tx.send(DiscoveryEvent::Lost { device_id }).is_err() {
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
             })
@@ -226,7 +260,7 @@ pub async fn start(
                             last_seen: Instant::now(),
                         };
                         trace!("beacon peer {peer}");
-                        if tx.send(peer).is_err() {
+                        if tx.send(DiscoveryEvent::Seen(peer)).is_err() {
                             return;
                         }
                     }
@@ -241,7 +275,7 @@ pub async fn start(
 
     info!("discovery listening on udp/{disc_port}, quic on udp/{quic_port}");
     Ok(Discovery {
-        peers: rx,
+        events: rx,
         local_addrs,
         daemon,
     })
@@ -256,8 +290,8 @@ pub async fn collect_peers(disc: &mut Discovery, timeout: Duration) -> Vec<Peer>
         if remaining.is_zero() {
             break;
         }
-        match tokio::time::timeout(remaining, disc.peers.recv()).await {
-            Ok(Some(peer)) => {
+        match tokio::time::timeout(remaining, disc.events.recv()).await {
+            Ok(Some(DiscoveryEvent::Seen(peer))) => {
                 // Prefer entries with a routable, non loopback address.
                 let better = match seen.get(&peer.device_id) {
                     None => true,
@@ -266,6 +300,9 @@ pub async fn collect_peers(disc: &mut Discovery, timeout: Duration) -> Vec<Peer>
                 if better {
                     seen.insert(peer.device_id.clone(), peer);
                 }
+            }
+            Ok(Some(DiscoveryEvent::Lost { device_id })) => {
+                seen.remove(&device_id);
             }
             Ok(None) => break,
             Err(_) => break,
@@ -283,11 +320,11 @@ const AMBIGUITY_SETTLE: Duration = Duration::from_millis(500);
 /// Resolve by exact address, device id prefix, or name substring. A name that matches
 /// several devices is an error listing their short ids.
 pub async fn find_peer(disc: &mut Discovery, needle: &str, timeout: Duration) -> Result<Peer> {
-    find_peer_rx(&mut disc.peers, needle, timeout).await
+    find_peer_rx(&mut disc.events, needle, timeout).await
 }
 
 async fn find_peer_rx(
-    peers: &mut mpsc::UnboundedReceiver<Peer>,
+    events: &mut mpsc::UnboundedReceiver<DiscoveryEvent>,
     needle: &str,
     timeout: Duration,
 ) -> Result<Peer> {
@@ -305,8 +342,8 @@ async fn find_peer_rx(
             .map(|until| until.saturating_duration_since(now))
             .unwrap_or_else(|| Duration::from_millis(500))
             .min(deadline.saturating_duration_since(now));
-        match tokio::time::timeout(wait, peers.recv()).await {
-            Ok(Some(peer)) => {
+        match tokio::time::timeout(wait, events.recv()).await {
+            Ok(Some(DiscoveryEvent::Seen(peer))) => {
                 if peer.device_id == needle {
                     return Ok(peer);
                 }
@@ -329,6 +366,13 @@ async fn find_peer_rx(
                     if better {
                         seen.insert(peer.device_id.clone(), peer);
                     }
+                }
+            }
+            Ok(Some(DiscoveryEvent::Lost { device_id })) => {
+                matched.remove(&device_id);
+                seen.remove(&device_id);
+                if matched.is_empty() {
+                    settle_until = None;
                 }
             }
             Ok(None) => break,
@@ -550,10 +594,18 @@ mod tests {
     #[tokio::test]
     async fn duplicate_names_are_rejected_with_short_ids() {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        tx.send(peer("aaaaaaaaaaaaaaaa", "Brave Otter", "10.0.0.2:53320"))
-            .expect("send");
-        tx.send(peer("bbbbbbbbbbbbbbbb", "Brave Otter", "10.0.0.3:53320"))
-            .expect("send");
+        tx.send(DiscoveryEvent::Seen(peer(
+            "aaaaaaaaaaaaaaaa",
+            "Brave Otter",
+            "10.0.0.2:53320",
+        )))
+        .expect("send");
+        tx.send(DiscoveryEvent::Seen(peer(
+            "bbbbbbbbbbbbbbbb",
+            "Brave Otter",
+            "10.0.0.3:53320",
+        )))
+        .expect("send");
         drop(tx);
 
         let err = find_peer_rx(&mut rx, "brave otter", Duration::from_secs(1))
@@ -568,8 +620,12 @@ mod tests {
     #[tokio::test]
     async fn unique_name_resolves_after_settle() {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        tx.send(peer("aaaaaaaaaaaaaaaa", "Brave Otter", "10.0.0.2:53320"))
-            .expect("send");
+        tx.send(DiscoveryEvent::Seen(peer(
+            "aaaaaaaaaaaaaaaa",
+            "Brave Otter",
+            "10.0.0.2:53320",
+        )))
+        .expect("send");
 
         let peer = find_peer_rx(&mut rx, "brave otter", Duration::from_secs(2))
             .await
@@ -580,10 +636,18 @@ mod tests {
     #[tokio::test]
     async fn full_device_id_skips_the_settle_window() {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        tx.send(peer("aaaaaaaaaaaaaaaa", "Brave Otter", "10.0.0.2:53320"))
-            .expect("send");
-        tx.send(peer("bbbbbbbbbbbbbbbb", "Brave Otter", "10.0.0.3:53320"))
-            .expect("send");
+        tx.send(DiscoveryEvent::Seen(peer(
+            "aaaaaaaaaaaaaaaa",
+            "Brave Otter",
+            "10.0.0.2:53320",
+        )))
+        .expect("send");
+        tx.send(DiscoveryEvent::Seen(peer(
+            "bbbbbbbbbbbbbbbb",
+            "Brave Otter",
+            "10.0.0.3:53320",
+        )))
+        .expect("send");
 
         let peer = tokio::time::timeout(
             Duration::from_millis(200),
@@ -593,5 +657,76 @@ mod tests {
         .expect("full id is unambiguous")
         .expect("one match");
         assert_eq!(peer.device_id, "aaaaaaaaaaaaaaaa");
+    }
+
+    #[tokio::test]
+    async fn collect_peers_drops_lost_peers() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let daemon = ServiceDaemon::new().expect("daemon");
+        let mut disc = Discovery {
+            events: rx,
+            local_addrs: vec![],
+            daemon,
+        };
+
+        tx.send(DiscoveryEvent::Seen(peer(
+            "aaaaaaaaaaaaaaaa",
+            "Device A",
+            "10.0.0.2:53320",
+        )))
+        .expect("send");
+        tx.send(DiscoveryEvent::Seen(peer(
+            "bbbbbbbbbbbbbbbb",
+            "Device B",
+            "10.0.0.3:53320",
+        )))
+        .expect("send");
+        tx.send(DiscoveryEvent::Lost {
+            device_id: "aaaaaaaaaaaaaaaa".into(),
+        })
+        .expect("send");
+
+        let peers = collect_peers(&mut disc, Duration::from_millis(100)).await;
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].device_id, "bbbbbbbbbbbbbbbb");
+    }
+
+    #[tokio::test]
+    async fn find_peer_rx_drops_lost_peer() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tx.send(DiscoveryEvent::Seen(peer(
+            "aaaaaaaaaaaaaaaa",
+            "Device A",
+            "10.0.0.2:53320",
+        )))
+        .expect("send");
+        tx.send(DiscoveryEvent::Lost {
+            device_id: "aaaaaaaaaaaaaaaa".into(),
+        })
+        .expect("send");
+        tx.send(DiscoveryEvent::Seen(peer(
+            "bbbbbbbbbbbbbbbb",
+            "Device B",
+            "10.0.0.3:53320",
+        )))
+        .expect("send");
+        drop(tx);
+
+        let peer = find_peer_rx(&mut rx, "Device B", Duration::from_secs(1))
+            .await
+            .expect("find Device B");
+        assert_eq!(peer.device_id, "bbbbbbbbbbbbbbbb");
+    }
+
+    #[test]
+    fn stale_peer_detection() {
+        // Beacon peer expires after TTL
+        assert!(!is_stale("beacon", 100, 105, 12));
+        assert!(is_stale("beacon", 100, 112, 12));
+        assert!(is_stale("beacon", 100, 120, 12));
+
+        // mDNS peer does not expire by TTL alone
+        assert!(!is_stale("mdns", 100, 105, 12));
+        assert!(!is_stale("mdns", 100, 1000, 12));
     }
 }

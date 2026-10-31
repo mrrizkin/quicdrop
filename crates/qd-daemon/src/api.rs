@@ -399,6 +399,7 @@ fn sse(event: &DaemonEvent) -> SseEvent {
     let name = match event {
         DaemonEvent::Hello { .. } => "hello",
         DaemonEvent::Peer { .. } => "peer",
+        DaemonEvent::PeerLost { .. } => "peer_lost",
         DaemonEvent::Session { .. } => "session",
         DaemonEvent::Progress { .. } => "progress",
         DaemonEvent::File { .. } => "file",

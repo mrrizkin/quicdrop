@@ -283,6 +283,17 @@ function upsertPeer(peer) {
   state.peers.sort((a, b) => a.name.localeCompare(b.name));
 }
 
+function removeDiscoveredPeer(deviceId) {
+  const lost = state.peers.find((p) => !p.manual && p.device_id === deviceId);
+  if (!lost) return;
+  if (state.selectedPeer === deviceId || state.selectedPeer === lost.addr || state.selectedPeer === peerKey(lost)) {
+    state.selectedPeer = null;
+  }
+  const remainingServer = state.peers.filter((p) => !p.manual && p.device_id !== deviceId);
+  state.peers = mergePeers(remainingServer);
+  schedulePeers();
+}
+
 const TERMINAL_STATUS = new Set(["done", "failed", "cancelled", "declined"]);
 
 const FILE_PHASES = ["active", "queue", "done", "failed"];
@@ -1322,7 +1333,7 @@ async function handleEvent(payload) {
         device_id: payload.device_id,
         short_id: String(payload.device_id || "").slice(0, 8),
       };
-      state.peers = payload.peers || [];
+      state.peers = mergePeers(payload.peers || []);
       state.approvals = payload.approvals || [];
       (payload.active || []).forEach(upsertTransfer);
       renderAll();
@@ -1330,6 +1341,9 @@ async function handleEvent(payload) {
     case "peer":
       upsertPeer(payload.peer);
       schedulePeers();
+      break;
+    case "peer_lost":
+      removeDiscoveredPeer(payload.device_id);
       break;
     case "session": {
       const before = state.transfers.find((t) => t.id === payload.transfer.id);
