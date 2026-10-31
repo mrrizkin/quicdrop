@@ -1,6 +1,6 @@
 pkgbase = quicdrop-bin
 	pkgdesc = Peer-to-peer file transfer over QUIC, prebuilt
-	pkgver = 2026.44.13
+	pkgver = 2026.44.14
 	pkgrel = 1
 	url = https://github.com/mrrizkin/quicdrop
 	arch = x86_64
@@ -17,9 +17,9 @@ pkgbase = quicdrop-bin
 	conflicts = quicdrop-git
 	options = !strip
 	options = !debug
-	source = quicdrop-desktop-2026.44.13-amd64.deb::https://github.com/mrrizkin/quicdrop/releases/download/v2026.44.13/quicdrop-desktop-2026.44.13-amd64.deb
-	source = quicdrop-2026.44.13.tar.gz::https://github.com/mrrizkin/quicdrop/archive/v2026.44.13.tar.gz
-	sha256sums = 151e37c4385969a36d8b5eab3028a19514af84704b9c4f6c0b3cdd84d03dadf0
-	sha256sums = 416cb5a9bf710327d84cd6fae074b4fbaba26db6f3d1026775837bbe069ab454
+	source = quicdrop-desktop-2026.44.14-amd64.deb::https://github.com/mrrizkin/quicdrop/releases/download/v2026.44.14/quicdrop-desktop-2026.44.14-amd64.deb
+	source = quicdrop-2026.44.14.tar.gz::https://github.com/mrrizkin/quicdrop/archive/v2026.44.14.tar.gz
+	sha256sums = ee59701ed84a1d0eef73a19a30afa05d3f8fbac086ae701f0f4da0de3a43b40a
+	sha256sums = 5c5f77b00a5d5064bb97db2b4391ea86f2dc6ea1568d25cd649a0a2c4b80ebcb
 
 pkgname = quicdrop-bin

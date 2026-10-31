@@ -1,7 +1,7 @@
 # Maintainer: quicdrop contributors
 
 pkgname=quicdrop
-pkgver=2026.44.13
+pkgver=2026.44.14
 pkgrel=1
 pkgdesc="Peer-to-peer file transfer over QUIC"
 arch=('x86_64' 'aarch64')
@@ -13,7 +13,7 @@ makedepends=('cargo' 'rust')
 # the Rust linker cannot resolve.
 options=('!lto')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
-sha256sums=('416cb5a9bf710327d84cd6fae074b4fbaba26db6f3d1026775837bbe069ab454')
+sha256sums=('5c5f77b00a5d5064bb97db2b4391ea86f2dc6ea1568d25cd649a0a2c4b80ebcb')
 
 build() {
   cd "$pkgname-$pkgver"
