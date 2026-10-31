@@ -268,7 +268,9 @@ function renderAll() {
 function renderDevice() {
   const { name, short_id: shortIdValue, device_id } = state.info;
   $("device-name").textContent = name || "this device";
-  $("device-id").textContent = shortIdValue ? `id ${shortIdValue}` : "";
+  const short = shortIdValue || String(device_id || "").slice(0, 8);
+  $("device-id").textContent = short ? `short id ${short}` : "";
+  $("device-id").title = device_id ? `Device id: ${device_id}` : "";
   $("device-dot").classList.add("on");
   const avatar = $("self-avatar");
   if (avatar) {
@@ -304,12 +306,15 @@ function renderPeers() {
       const isSelected = state.selectedPeer === key;
       return `
         <li class="peer ${isSelected ? "selected" : ""}" data-key="${esc(key)}"
-            title="${esc(peer.name)}">
+            title="${esc(peer.name)} · id ${esc(shortId(peer.device_id))}">
           <span class="peer-check">✓</span>
           <div class="peer-top">
             <div class="avatar" style="--hue:${hueFor(peer.device_id)}">${initial(peer.name)}</div>
             <div class="peer-main">
-              <div class="peer-name">${esc(peer.name)}</div>
+              <div class="peer-name">
+                <span class="peer-label">${esc(peer.name)}</span>
+                <span class="peer-id" title="device id">${shortId(peer.device_id)}</span>
+              </div>
               <div class="peer-meta">
                 <span>${shortId(peer.device_id)}</span>
                 <span class="sep">·</span>
@@ -363,6 +368,7 @@ function renderTrust() {
       <li class="trust-item">
         <div class="avatar" style="--hue:${hueFor(peer.device_id)}">${initial(peer.name)}</div>
         <span class="name" title="${esc(peer.name)}">${esc(peer.name)}</span>
+        <span class="peer-id" title="device id">${shortId(peer.device_id)}</span>
         <span class="when">${timeAgo(peer.last_seen)}</span>
         <button class="icon-btn" data-forget="${esc(peer.device_id)}" title="Forget">${icon("trash")}</button>
       </li>`,
@@ -716,7 +722,7 @@ function renderApproval() {
   $("approval-avatar").style.setProperty("--hue", hueFor(approval.peer_id));
   $("approval-dest").textContent = state.config.out_dir || "your download folder";
   $("approval-title").textContent = approval.peer_name;
-  $("approval-sub").textContent = `${approval.files.length} files · ${fmtBytes(approval.total_bytes)}`;
+  $("approval-sub").textContent = `id ${shortId(approval.peer_id)} · ${approval.files.length} files · ${fmtBytes(approval.total_bytes)}`;
   $("approval-files").innerHTML = approval.files
     .map(
       (file) =>
@@ -779,11 +785,13 @@ async function sendFolderToSelected() {
 async function sendPaths(peer, paths, message) {
   try {
     await api("POST", "/api/send", {
-      to: peer.addr,
+      // Device id is unique and pins the certificate; a name can repeat.
+      to: peer.device_id || peer.addr,
+      peer_name: peer.name,
       paths,
       concurrency: 8,
     });
-    toast(message || `Sending to ${peer.name}…`);
+    toast(message || `Sending to ${peer.name} (${shortId(peer.device_id)})…`);
   } catch (error) {
     toast(`Send failed: ${error}`);
   }
@@ -816,6 +824,8 @@ async function openSettings() {
     /* use cached */
   }
   const info = state.info || {};
+  $("settings-name").value = info.name || "";
+  $("settings-short-id").textContent = info.short_id || String(info.device_id || "").slice(0, 8) || "—";
   $("settings-theme").value = prefs.theme;
   $("settings-density").value = prefs.density;
   $("settings-motion").checked = prefs.motion;
@@ -826,6 +836,7 @@ async function openSettings() {
   $("about-version").textContent = info.version || "—";
   $("about-platform").textContent = info.platform || "—";
   $("about-name").textContent = info.name || "—";
+  $("about-short").textContent = info.short_id || "—";
   $("about-id").textContent = info.device_id || "—";
   $("about-config").textContent = info.config_dir || "—";
   $("about-quic").textContent = info.quic_port ? `udp/${info.quic_port}` : "—";
@@ -846,11 +857,24 @@ async function saveSettings() {
   const out_dir = $("settings-out").value.trim();
   const policy = $("settings-policy").value;
   const concurrency = Number($("settings-concurrency").value) || 8;
+  const name = $("settings-name").value.trim();
   try {
-    await api("PATCH", "/api/config", { out_dir: out_dir || undefined, policy, concurrency });
+    const patched = await api("PATCH", "/api/config", {
+      out_dir: out_dir || undefined,
+      policy,
+      concurrency,
+      name: name || undefined,
+    });
     state.config = { ...state.config, out_dir, policy, concurrency };
+    state.info = {
+      ...state.info,
+      name: patched.name || state.info.name,
+      short_id: patched.short_id || state.info.short_id,
+    };
+    renderDevice();
     $("settings-modal").hidden = true;
-    toast("Settings saved");
+    toast(patched.name ? `Saved as ${patched.name}` : "Settings saved");
+    refresh();
   } catch (error) {
     $("settings-hint").textContent = String(error);
   }
@@ -872,6 +896,22 @@ $("settings-clear").addEventListener("click", async () => {
     $("settings-hint").textContent = "History cleared.";
   } catch (error) {
     $("settings-hint").textContent = String(error);
+  }
+});
+$("settings-copy-short").addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText(state.info.short_id || "");
+    $("settings-hint").textContent = "Short id copied.";
+  } catch (_) {
+    $("settings-hint").textContent = "Could not copy.";
+  }
+});
+$("about-copy-short").addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText(state.info.short_id || "");
+    $("settings-hint").textContent = "Short id copied.";
+  } catch (_) {
+    $("settings-hint").textContent = "Could not copy.";
   }
 });
 $("about-copy").addEventListener("click", async () => {
@@ -915,6 +955,7 @@ async function handleEvent(payload) {
         ...state.info,
         name: payload.name,
         device_id: payload.device_id,
+        short_id: String(payload.device_id || "").slice(0, 8),
       };
       state.peers = payload.peers || [];
       state.approvals = payload.approvals || [];
@@ -967,7 +1008,15 @@ async function handleEvent(payload) {
       scheduleTrust();
       break;
     case "config":
-      state.config = { out_dir: payload.out_dir, policy: payload.policy };
+      state.config = {
+        out_dir: payload.out_dir,
+        policy: payload.policy,
+        name: payload.name,
+      };
+      if (payload.name && payload.name !== state.info.name) {
+        state.info = { ...state.info, name: payload.name };
+        renderDevice();
+      }
       break;
   }
 }

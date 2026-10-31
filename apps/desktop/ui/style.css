@@ -319,11 +319,25 @@ select {
 }
 
 .peer-name {
-  display: block;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
   font-size: 12.5px;
+  min-width: 0;
+}
+
+.peer-label {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.peer-id {
+  flex: none;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-3);
+  letter-spacing: 0.02em;
 }
 
 .peer.selected .peer-name {
@@ -413,6 +427,10 @@ select {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.trust-item .peer-id {
+  flex: none;
 }
 
 .trust-item .when {
@@ -1129,6 +1147,19 @@ select.input {
   flex-direction: column;
   gap: 12px;
   min-width: 0;
+}
+
+.settings-panes section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.field-note {
+  margin: -4px 0 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-3);
 }
 
 .settings-panes .row {

@@ -101,6 +101,9 @@ struct Respond {
 struct SendRequest {
     /// Peer name, device id prefix, `ip:port`, or an address.
     to: String,
+    /// Display name for the transfer list when `to` is a device id.
+    #[serde(default)]
+    peer_name: Option<String>,
     paths: Vec<PathBuf>,
     #[serde(default)]
     concurrency: Option<usize>,
@@ -125,6 +128,8 @@ struct ConfigPatch {
     policy: Option<Policy>,
     #[serde(default)]
     concurrency: Option<usize>,
+    #[serde(default)]
+    name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -140,7 +145,7 @@ async fn status(State(inner): State<Arc<Inner>>) -> Json<Value> {
         .unwrap_or(0);
     let counts = inner.counts();
     Json(json!({
-        "name": inner.identity.name,
+        "name": inner.identity.name(),
         "device_id": inner.identity.device_id,
         "short_id": inner.identity.short_id(),
         "platform": Identity::platform(),
@@ -280,6 +285,7 @@ async fn send(
     let id = spawn_send(
         inner,
         body.to,
+        body.peer_name,
         body.paths,
         concurrency,
         Duration::from_secs(body.timeout_secs.unwrap_or(5).max(1)),
@@ -311,6 +317,9 @@ async fn clear_transfers(State(inner): State<Arc<Inner>>) -> Json<Value> {
 
 async fn config(State(inner): State<Arc<Inner>>) -> Json<Value> {
     Json(json!({
+        "name": inner.identity.name(),
+        "short_id": inner.identity.short_id(),
+        "device_id": inner.identity.device_id,
         "out_dir": inner.runtime.out_dir(),
         "policy": inner.runtime.policy(),
         "concurrency": inner.runtime.concurrency(),
@@ -332,13 +341,20 @@ async fn patch_config(
     if let Some(concurrency) = body.concurrency {
         inner.runtime.set_concurrency(concurrency);
     }
-    inner.broadcast(DaemonEvent::Config {
-        out_dir: inner.runtime.out_dir().display().to_string(),
-        policy: inner.runtime.policy(),
-    });
+    if let Some(name) = &body.name {
+        // rename() already broadcasts; other patches need their own event.
+        inner
+            .rename(name)
+            .map_err(|e| bad_request(format!("{e:#}")))?;
+    } else {
+        inner.broadcast(inner.config_event());
+    }
     Ok(Json(json!({
+        "name": inner.identity.name(),
+        "short_id": inner.identity.short_id(),
         "out_dir": inner.runtime.out_dir(),
         "policy": inner.runtime.policy(),
+        "concurrency": inner.runtime.concurrency(),
     })))
 }
 
@@ -349,7 +365,7 @@ async fn shutdown(State(inner): State<Arc<Inner>>) -> Json<Value> {
 
 fn hello_event(inner: &Arc<Inner>) -> DaemonEvent {
     DaemonEvent::Hello {
-        name: inner.identity.name.clone(),
+        name: inner.identity.name(),
         device_id: inner.identity.device_id.clone(),
         peers: inner.peers(),
         approvals: inner.pending_approvals(),

@@ -53,6 +53,10 @@ qd id
 discovery and certificate pinning. Folders are walked recursively, symlinks skipped, relative
 paths recreated on the receiver; an existing file becomes `name (1).ext`.
 
+Names can repeat; the 8-character id shown next to a name is unique. When a name matches
+several devices, `qd` lists the candidates instead of guessing; send to one of their short
+ids to pick exactly.
+
 State is in `~/.config/quicdrop` (override `QD_CONFIG_DIR`): identity, `name.txt`,
 `trusted.json`. Incoming offers from unknown devices prompt on the terminal, or are rejected
 when there is no terminal. Deleting the directory creates a new device.
@@ -64,7 +68,9 @@ cargo run --manifest-path apps/desktop/Cargo.toml
 ```
 
 It embeds the daemon (`quicdropd`, loopback API on 53319) and serves a static `ui/`.
-Linux needs `webkit2gtk-4.1`, `gtk+-3.0`, `libsoup-3.0`, `javascriptcoregtk-4.1`.
+Linux needs `webkit2gtk-4.1`, `gtk+-3.0`, `libsoup-3.0`, `javascriptcoregtk-4.1`. Peer rows
+show their short id, sends target the device id so the certificate is pinned, and Settings →
+General renames this device without changing its id or trust.
 
 ## Protocol
 

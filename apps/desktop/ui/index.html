@@ -138,6 +138,19 @@
           <div class="settings-panes">
             <section data-pane="general">
               <label class="field">
+                <span>Device name</span>
+                <input class="input" id="settings-name" type="text" maxlength="48" spellcheck="false" />
+              </label>
+              <p class="field-note">
+                Names can repeat. The short id is unique; share it to receive files.
+              </p>
+              <div class="kv">
+                <span>Short id</span><code id="settings-short-id">—</code>
+              </div>
+              <div class="row end">
+                <button class="btn" id="settings-copy-short">Copy short id</button>
+              </div>
+              <label class="field">
                 <span>Theme</span>
                 <select class="input" id="settings-theme">
                   <option value="system">System</option>
@@ -209,11 +222,13 @@
                 <span>Version</span><code id="about-version">—</code>
                 <span>Platform</span><code id="about-platform">—</code>
                 <span>Device</span><code id="about-name">—</code>
+                <span>Short id</span><code id="about-short">—</code>
                 <span>Device id</span>
                 <code id="about-id">—</code>
                 <span>Config</span><code id="about-config">—</code>
               </div>
               <div class="row end">
+                <button class="btn" id="about-copy-short">Copy short id</button>
                 <button class="btn" id="about-copy">Copy device id</button>
               </div>
             </section>

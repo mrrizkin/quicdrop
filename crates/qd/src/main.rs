@@ -143,7 +143,7 @@ async fn main() -> Result<()> {
             let server = start(opts.clone()).await?;
             println!(
                 "qd receiving as \"{}\" ({}) on {}",
-                server.identity.name,
+                server.identity.name(),
                 server.identity.short_id(),
                 server.addr_hint(cli.port)
             );
@@ -209,7 +209,8 @@ async fn main() -> Result<()> {
         }
         Command::Id => {
             let identity = Identity::load_or_create(cli.name)?;
-            println!("name:      {}", identity.name);
+            println!("name:      {}", identity.name());
+            println!("short id:  {}", identity.short_id());
             println!("device id: {}", identity.device_id);
             println!("config:    {}", identity.dir.display());
             Ok(())

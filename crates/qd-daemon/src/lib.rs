@@ -1,7 +1,7 @@
 //! Daemon: the transfer engine behind a loopback JSON/SSE API, embedded by `quicdropd` and
 //! the desktop app. State changes require the bearer token written to `daemon.json`.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use qd_core::approval::{self, ApprovalRequest, Decision, APPROVAL_TIMEOUT};
 use qd_core::client::{self, SendOpts};
 use qd_core::proto::FileMeta;
@@ -194,6 +194,7 @@ pub enum DaemonEvent {
     Config {
         out_dir: String,
         policy: Policy,
+        name: String,
     },
 }
 
@@ -228,6 +229,21 @@ impl Inner {
 
     pub fn broadcast(&self, event: DaemonEvent) {
         let _ = self.events.send(event);
+    }
+
+    /// Rename and re-announce. The device id, and any trust pinned to it, does not change.
+    pub fn rename(&self, name: &str) -> Result<()> {
+        self.identity.set_name(name)?;
+        self.broadcast(self.config_event());
+        Ok(())
+    }
+
+    fn config_event(&self) -> DaemonEvent {
+        DaemonEvent::Config {
+            out_dir: self.runtime.out_dir().display().to_string(),
+            policy: self.runtime.policy(),
+            name: self.identity.name(),
+        }
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<DaemonEvent> {
@@ -520,6 +536,7 @@ impl Daemon {
         let mut opts =
             server::ServerOpts::new(cfg.quic_port, cfg.discovery_port, cfg.out_dir.clone());
         opts.name = cfg.name.clone();
+        opts.identity = Some(identity.clone());
         opts.quiet = cfg.quiet;
         opts.policy = cfg.policy;
         opts.trust = inner.trust.clone();
@@ -532,7 +549,7 @@ impl Daemon {
         info!(
             "quicdropd {} as \"{}\" ({}) — api {addr}, quic udp/{}",
             API_VERSION,
-            identity.name,
+            identity.name(),
             identity.short_id(),
             cfg.quic_port
         );
@@ -842,16 +859,54 @@ async fn approval_forwarder(
     }
 }
 
-/// Best match for `target` among the peers discovery has already reported.
-fn known_peer(inner: &Arc<Inner>, target: &str, needle: &str) -> Option<PeerView> {
-    let peers: Vec<PeerView> = inner
-        .peers
-        .lock()
-        .map(|p| p.values().cloned().collect())
-        .unwrap_or_default();
-    peers
+/// Best match for `target` among the peers discovery has already reported. A device id
+/// prefix wins; a name that matches several devices is an error, not a guess.
+fn known_peer(inner: &Arc<Inner>, target: &str, needle: &str) -> Result<Option<PeerView>> {
+    let peers = inner.peers();
+    let by_id: Vec<PeerView> = peers
+        .iter()
+        .filter(|p| p.device_id.starts_with(target))
+        .cloned()
+        .collect();
+    if by_id.len() == 1 {
+        return Ok(by_id.into_iter().next());
+    }
+    if by_id.len() > 1 {
+        bail!(
+            "device id prefix '{target}' matches {} devices: {}",
+            by_id.len(),
+            peer_choices(&by_id)
+        );
+    }
+
+    let by_name: Vec<PeerView> = peers
         .into_iter()
-        .find(|p| p.device_id.starts_with(target) || p.name.to_lowercase().contains(needle))
+        .filter(|p| p.name.to_lowercase().contains(needle))
+        .collect();
+    match by_name.len() {
+        0 => Ok(None),
+        1 => Ok(by_name.into_iter().next()),
+        _ => bail!(
+            "'{target}' matches {} devices: {}. Send to one of the 8-character device ids instead.",
+            by_name.len(),
+            peer_choices(&by_name)
+        ),
+    }
+}
+
+fn peer_choices(peers: &[PeerView]) -> String {
+    peers
+        .iter()
+        .map(|p| {
+            format!(
+                "{} ({}) at {}",
+                p.name,
+                &p.device_id[..8.min(p.device_id.len())],
+                p.addr
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Resolve a send target: `ip:port`, a known peer, or a discovery lookup.
@@ -868,7 +923,7 @@ pub async fn resolve_target(
     // The running discovery feeds `peers`; wait for it before starting another one.
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
-        if let Some(peer) = known_peer(inner, target, &needle) {
+        if let Some(peer) = known_peer(inner, target, &needle)? {
             let addr: SocketAddr = peer
                 .addr
                 .parse()
@@ -924,6 +979,7 @@ pub fn file_views(files: &[FileMeta]) -> Vec<FileView> {
 pub async fn spawn_send(
     inner: Arc<Inner>,
     to: String,
+    peer_name: Option<String>,
     paths: Vec<PathBuf>,
     concurrency: usize,
     timeout: Duration,
@@ -949,7 +1005,9 @@ pub async fn spawn_send(
         })
         .collect();
     let total: u64 = files.iter().map(|f| f.size).sum();
-    let id = inner.start_transfer(Direction::Out, &to, &to, files, total);
+    // `to` may be a device id; keep the human name for the transfer list.
+    let label = peer_name.clone().unwrap_or_else(|| to.clone());
+    let id = inner.start_transfer(Direction::Out, &to, &label, files, total);
 
     let state = inner.clone();
     let transfer_id = id.clone();
@@ -1002,7 +1060,7 @@ pub async fn spawn_send(
             files: paths,
             concurrency: concurrency.max(1),
             quiet: true,
-            name: Some(state.identity.name.clone()),
+            name: Some(state.identity.name()),
             progress: Some(progress),
             file_progress: Some(file_progress),
             file_verdict: Some(file_verdict),

@@ -92,24 +92,23 @@ pub async fn start(
         .copied();
 
     let daemon = ServiceDaemon::new().context("create mDNS daemon")?;
-    let instance = format!("{}-{}", identity.name, identity.short_id());
-    let host = format!("{}.local.", sanitize_host(&identity.name));
-    let props = HashMap::from([
-        ("id".to_string(), identity.device_id.clone()),
-        ("name".to_string(), identity.name.clone()),
-        ("platform".to_string(), Identity::platform().to_string()),
-        ("v".to_string(), PROTO_VERSION.to_string()),
-    ]);
     let ip = primary.unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
     if advertise {
-        match ServiceInfo::new(MDNS_SERVICE, &instance, &host, ip, quic_port, props) {
-            Ok(info) => {
-                if let Err(e) = daemon.register(info) {
-                    warn!("mDNS register failed: {e}");
+        let mut current = register_service(&daemon, &identity, ip, quic_port);
+        // Two records for one device would let peers resolve a stale address.
+        let mut renamed = identity.subscribe_name();
+        let daemon = daemon.clone();
+        let identity = identity.clone();
+        tokio::spawn(async move {
+            while renamed.changed().await.is_ok() {
+                if let Some(fullname) = current.take() {
+                    if let Err(e) = daemon.unregister(&fullname) {
+                        debug!("mDNS unregister failed: {e}");
+                    }
                 }
+                current = register_service(&daemon, &identity, ip, quic_port);
             }
-            Err(e) => warn!("mDNS service info failed: {e}"),
-        }
+        });
     }
 
     let browse = daemon.browse(MDNS_SERVICE).context("mDNS browse")?;
@@ -173,28 +172,28 @@ pub async fn start(
         let socket = socket.clone();
         let identity = identity.clone();
         tokio::spawn(async move {
-            let beacon = Beacon {
-                v: PROTO_VERSION,
-                device_id: identity.device_id.clone(),
-                name: identity.name.clone(),
-                platform: Identity::platform().to_string(),
-                quic_port,
-            };
-            let mut payload = BROADCAST_MAGIC.to_vec();
-            match postcard::to_stdvec(&beacon) {
-                Ok(body) => payload.extend_from_slice(&body[..]),
-                Err(e) => {
-                    warn!("beacon encode failed: {e}");
-                    return;
-                }
-            }
             let broadcast = SocketAddrV4::new(Ipv4Addr::BROADCAST, disc_port);
             let multicast = SocketAddrV4::new(Ipv4Addr::from(MULTICAST_GROUP), disc_port);
             loop {
-                for target in [SocketAddr::V4(broadcast), SocketAddr::V4(multicast)] {
-                    if let Err(e) = socket.send_to(&payload, target).await {
-                        trace!("beacon send to {target} failed: {e}");
+                // Rebuilt each tick so a rename applies without restarting discovery.
+                let beacon = Beacon {
+                    v: PROTO_VERSION,
+                    device_id: identity.device_id.clone(),
+                    name: identity.name(),
+                    platform: Identity::platform().to_string(),
+                    quic_port,
+                };
+                match postcard::to_stdvec(&beacon) {
+                    Ok(body) => {
+                        let mut payload = BROADCAST_MAGIC.to_vec();
+                        payload.extend_from_slice(&body);
+                        for target in [SocketAddr::V4(broadcast), SocketAddr::V4(multicast)] {
+                            if let Err(e) = socket.send_to(&payload, target).await {
+                                trace!("beacon send to {target} failed: {e}");
+                            }
+                        }
                     }
+                    Err(e) => warn!("beacon encode failed: {e}"),
                 }
                 tokio::time::sleep(BEACON_INTERVAL).await;
             }
@@ -284,43 +283,93 @@ pub async fn collect_peers(disc: &mut Discovery, timeout: Duration) -> Vec<Peer>
     peers
 }
 
-/// Resolve a peer by exact address, device id prefix, or name substring.
+/// Names are labels and can repeat; wait briefly after the first match in case another
+/// device answers with the same name.
+const AMBIGUITY_SETTLE: Duration = Duration::from_millis(500);
+
+/// Resolve by exact address, device id prefix, or name substring. A name that matches
+/// several devices is an error listing their short ids.
 pub async fn find_peer(disc: &mut Discovery, needle: &str, timeout: Duration) -> Result<Peer> {
+    find_peer_rx(&mut disc.peers, needle, timeout).await
+}
+
+async fn find_peer_rx(
+    peers: &mut mpsc::UnboundedReceiver<Peer>,
+    needle: &str,
+    timeout: Duration,
+) -> Result<Peer> {
     let deadline = tokio::time::Instant::now() + timeout;
+    let mut matched: HashMap<String, Peer> = HashMap::new();
     let mut seen: HashMap<String, Peer> = HashMap::new();
+    let mut settle_until: Option<tokio::time::Instant> = None;
+
     loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
+        let now = tokio::time::Instant::now();
+        if settle_until.is_some_and(|until| now >= until) || now >= deadline {
             break;
         }
-        match tokio::time::timeout(remaining.min(Duration::from_millis(500)), disc.peers.recv())
-            .await
-        {
+        let wait = settle_until
+            .map(|until| until.saturating_duration_since(now))
+            .unwrap_or_else(|| Duration::from_millis(500))
+            .min(deadline.saturating_duration_since(now));
+        match tokio::time::timeout(wait, peers.recv()).await {
             Ok(Some(peer)) => {
-                if matches(&peer, needle) {
+                if peer.device_id == needle {
                     return Ok(peer);
                 }
-                let better = match seen.get(&peer.device_id) {
-                    None => true,
-                    Some(existing) => rank(&peer) > rank(existing),
-                };
-                if better {
-                    seen.insert(peer.device_id.clone(), peer);
+                if matches(&peer, needle) {
+                    if settle_until.is_none() {
+                        settle_until = Some(now + AMBIGUITY_SETTLE);
+                    }
+                    let better = match matched.get(&peer.device_id) {
+                        None => true,
+                        Some(existing) => rank(&peer) > rank(existing),
+                    };
+                    if better {
+                        matched.insert(peer.device_id.clone(), peer);
+                    }
+                } else {
+                    let better = match seen.get(&peer.device_id) {
+                        None => true,
+                        Some(existing) => rank(&peer) > rank(existing),
+                    };
+                    if better {
+                        seen.insert(peer.device_id.clone(), peer);
+                    }
                 }
             }
             Ok(None) => break,
             Err(_) => continue,
         }
     }
-    let known: Vec<String> = seen.values().map(|p| p.to_string()).collect();
-    anyhow::bail!(
-        "peer '{needle}' not found (saw: {})",
-        if known.is_empty() {
-            "nothing".to_string()
-        } else {
-            known.join(", ")
+
+    match matched.len() {
+        0 => {
+            let known: Vec<String> = seen.values().map(|p| p.to_string()).collect();
+            anyhow::bail!(
+                "peer '{needle}' not found (saw: {})",
+                if known.is_empty() {
+                    "nothing".to_string()
+                } else {
+                    known.join(", ")
+                }
+            )
         }
-    )
+        1 => Ok(matched.into_values().next().expect("one match")),
+        _ => {
+            let mut choices: Vec<&Peer> = matched.values().collect();
+            choices.sort_by(|a, b| a.name.cmp(&b.name));
+            anyhow::bail!(
+                "'{needle}' matches {} devices: {}. Send to one of the 8-character device ids instead.",
+                choices.len(),
+                choices
+                    .iter()
+                    .map(|p| format!("{} ({}) at {}", p.name, p.short_id(), p.addr))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            )
+        }
+    }
 }
 
 fn matches(peer: &Peer, needle: &str) -> bool {
@@ -354,6 +403,57 @@ fn sanitize_host(name: &str) -> String {
         "quicdrop".to_string()
     } else {
         cleaned
+    }
+}
+
+/// mDNS labels stay under 64 bytes (RFC 6763).
+const MAX_LABEL: usize = 63;
+
+fn label(name: &str, suffix: &str) -> String {
+    let base = sanitize_host(name);
+    let room = MAX_LABEL.saturating_sub(suffix.len() + 1);
+    let base: String = base.chars().take(room).collect();
+    let base = base.trim_end_matches('-');
+    let base = if base.is_empty() { "quicdrop" } else { base };
+    format!("{base}-{suffix}")
+}
+
+fn service_info(identity: &Identity, ip: IpAddr, quic_port: u16) -> Result<ServiceInfo> {
+    let name = identity.name();
+    // The short id keeps instance and host unique when two devices pick the same name.
+    let instance = label(&name, identity.short_id());
+    let host = format!("{}.local.", label(&name, identity.short_id()));
+    let props = HashMap::from([
+        ("id".to_string(), identity.device_id.clone()),
+        ("name".to_string(), name),
+        ("platform".to_string(), Identity::platform().to_string()),
+        ("v".to_string(), PROTO_VERSION.to_string()),
+    ]);
+    ServiceInfo::new(MDNS_SERVICE, &instance, &host, ip, quic_port, props)
+        .context("mDNS service info")
+}
+
+/// Returns the fullname needed to unregister the service.
+fn register_service(
+    daemon: &ServiceDaemon,
+    identity: &Identity,
+    ip: IpAddr,
+    quic_port: u16,
+) -> Option<String> {
+    let info = match service_info(identity, ip, quic_port) {
+        Ok(info) => info,
+        Err(e) => {
+            warn!("mDNS service info failed: {e:#}");
+            return None;
+        }
+    };
+    let fullname = info.get_fullname().to_string();
+    match daemon.register(info) {
+        Ok(()) => Some(fullname),
+        Err(e) => {
+            warn!("mDNS register failed: {e}");
+            None
+        }
     }
 }
 
@@ -428,4 +528,69 @@ fn extra_local_ips() -> HashSet<IpAddr> {
         }
     }
     set
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn peer(id: &str, name: &str, addr: &str) -> Peer {
+        Peer {
+            device_id: id.to_string(),
+            name: name.to_string(),
+            platform: "linux".to_string(),
+            quic_port: 53320,
+            addr: addr.parse().expect("test address"),
+            source: "beacon",
+            last_seen: Instant::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn duplicate_names_are_rejected_with_short_ids() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tx.send(peer("aaaaaaaaaaaaaaaa", "Brave Otter", "10.0.0.2:53320"))
+            .expect("send");
+        tx.send(peer("bbbbbbbbbbbbbbbb", "Brave Otter", "10.0.0.3:53320"))
+            .expect("send");
+        drop(tx);
+
+        let err = find_peer_rx(&mut rx, "brave otter", Duration::from_secs(1))
+            .await
+            .expect_err("two devices share the name");
+        let message = err.to_string();
+        assert!(message.contains("2 devices"), "{message}");
+        assert!(message.contains("aaaaaaaa"), "{message}");
+        assert!(message.contains("bbbbbbbb"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn unique_name_resolves_after_settle() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tx.send(peer("aaaaaaaaaaaaaaaa", "Brave Otter", "10.0.0.2:53320"))
+            .expect("send");
+
+        let peer = find_peer_rx(&mut rx, "brave otter", Duration::from_secs(2))
+            .await
+            .expect("one match");
+        assert_eq!(peer.device_id, "aaaaaaaaaaaaaaaa");
+    }
+
+    #[tokio::test]
+    async fn full_device_id_skips_the_settle_window() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tx.send(peer("aaaaaaaaaaaaaaaa", "Brave Otter", "10.0.0.2:53320"))
+            .expect("send");
+        tx.send(peer("bbbbbbbbbbbbbbbb", "Brave Otter", "10.0.0.3:53320"))
+            .expect("send");
+
+        let peer = tokio::time::timeout(
+            Duration::from_millis(200),
+            find_peer_rx(&mut rx, "aaaaaaaaaaaaaaaa", Duration::from_secs(2)),
+        )
+        .await
+        .expect("full id is unambiguous")
+        .expect("one match");
+        assert_eq!(peer.device_id, "aaaaaaaaaaaaaaaa");
+    }
 }

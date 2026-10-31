@@ -58,6 +58,9 @@ pub struct ServerOpts {
     pub events: Option<ServerEventSink>,
     /// Optional live overrides for settings a long-running host changes at runtime.
     pub runtime: Option<Arc<RuntimeSettings>>,
+    /// Prebuilt identity; the daemon shares one so renames reach the API and the advertised
+    /// session.
+    pub identity: Option<Arc<Identity>>,
 }
 
 /// Settings that can be changed after the server started (used by the daemon).
@@ -124,6 +127,7 @@ impl std::fmt::Debug for ServerOpts {
             .field("approver", &self.approver.is_some())
             .field("events", &self.events.is_some())
             .field("runtime", &self.runtime.is_some())
+            .field("identity", &self.identity.as_ref().map(|i| i.short_id()))
             .finish()
     }
 }
@@ -226,6 +230,7 @@ impl ServerOpts {
             approver: None,
             events: None,
             runtime: None,
+            identity: None,
         }
     }
 
@@ -266,7 +271,10 @@ impl RunningServer {
 
 /// Build the endpoint and start advertising. Use [`serve`] to run the accept loop.
 pub async fn start(opts: ServerOpts) -> Result<RunningServer> {
-    let identity = Arc::new(Identity::load_or_create(opts.name.clone())?);
+    let identity = match opts.identity.clone() {
+        Some(identity) => identity,
+        None => Arc::new(Identity::load_or_create(opts.name.clone())?),
+    };
     tokio::fs::create_dir_all(&opts.out_dir)
         .await
         .with_context(|| format!("create output dir {}", opts.out_dir.display()))?;
@@ -297,7 +305,7 @@ pub async fn serve(mut server: RunningServer, opts: ServerOpts) -> Result<()> {
 
     info!(
         "receiving as \"{}\" ({}) on {}",
-        server.identity.name,
+        server.identity.name(),
         server.identity.short_id(),
         server.addr_hint(opts.quic_port)
     );
@@ -455,7 +463,7 @@ async fn handle_connection(
         &Frame::Hello {
             version: proto::PROTO_VERSION,
             device_id: identity.device_id.clone(),
-            name: identity.name.clone(),
+            name: identity.name(),
             platform: Identity::platform().to_string(),
         },
     )

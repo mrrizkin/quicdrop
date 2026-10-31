@@ -175,7 +175,7 @@ pub async fn send(opts: SendOpts) -> Result<Summary> {
         &Frame::Hello {
             version: proto::PROTO_VERSION,
             device_id: identity.device_id.clone(),
-            name: identity.name.clone(),
+            name: identity.name(),
             platform: Identity::platform().to_string(),
         },
     )

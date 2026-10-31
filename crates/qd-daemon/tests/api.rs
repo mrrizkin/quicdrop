@@ -68,6 +68,49 @@ async fn api_roundtrip() -> Result<()> {
         .send()
         .await?;
 
+    // --- rename -----------------------------------------------------------
+    let device_id = status["device_id"].clone();
+    let short_id = status["short_id"].clone();
+    let renamed: Value = http
+        .patch(format!("{base}/api/config"))
+        .bearer_auth("test-token")
+        .json(&json!({ "name": "  Quiet Falcon  " }))
+        .send()
+        .await?
+        .json()
+        .await?;
+    assert_eq!(renamed["name"], "Quiet Falcon");
+    assert_eq!(renamed["short_id"], short_id);
+    let after: Value = http
+        .get(format!("{base}/api/status"))
+        .bearer_auth("test-token")
+        .send()
+        .await?
+        .json()
+        .await?;
+    assert_eq!(after["name"], "Quiet Falcon");
+    // The certificate fingerprint, and so the trust anchor, is unchanged.
+    assert_eq!(after["device_id"], device_id);
+    assert_eq!(after["short_id"], short_id);
+
+    for bad in ["", "   ", "line\nbreak"] {
+        let response = http
+            .patch(format!("{base}/api/config"))
+            .bearer_auth("test-token")
+            .json(&json!({ "name": bad }))
+            .send()
+            .await?;
+        assert_eq!(response.status(), 400, "name {bad:?} must be rejected");
+    }
+    let too_long = "x".repeat(qd_core::identity::MAX_NAME_LEN + 1);
+    let response = http
+        .patch(format!("{base}/api/config"))
+        .bearer_auth("test-token")
+        .json(&json!({ "name": too_long }))
+        .send()
+        .await?;
+    assert_eq!(response.status(), 400);
+
     // --- trust ------------------------------------------------------------
     http.post(format!("{base}/api/trust"))
         .bearer_auth("test-token")

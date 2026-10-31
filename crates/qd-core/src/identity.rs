@@ -1,13 +1,50 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use rcgen::{date_time_ymd, CertificateParams, DnType, KeyPair};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
+use tokio::sync::watch;
+
+/// Longest display name accepted from a user or host.
+pub const MAX_NAME_LEN: usize = 48;
+
+/// Shared by every clone of an [`Identity`]; the device id does not follow the name.
+#[derive(Debug, Clone)]
+struct NameCell {
+    value: Arc<RwLock<String>>,
+    changed: watch::Sender<u64>,
+}
+
+impl NameCell {
+    fn new(name: String) -> Self {
+        let (changed, _) = watch::channel(0);
+        Self {
+            value: Arc::new(RwLock::new(name)),
+            changed,
+        }
+    }
+
+    fn get(&self) -> String {
+        self.value
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn set(&self, name: String) {
+        *self
+            .value
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = name;
+        self.changed.send_modify(|generation| *generation += 1);
+    }
+}
 
 /// Long-lived identity. The device id is the certificate fingerprint, so peers can pin it.
 #[derive(Debug, Clone)]
 pub struct Identity {
     pub device_id: String,
-    pub name: String,
+    name: NameCell,
     pub cert_der: Vec<u8>,
     pub key_der: Vec<u8>,
     pub dir: PathBuf,
@@ -37,14 +74,14 @@ impl Identity {
         let cert_path = dir.join("identity.crt");
         let name_path = dir.join("name.txt");
 
-        let display_name = name
-            .or_else(|| {
-                fs::read_to_string(&name_path)
-                    .ok()
-                    .map(|s| s.trim().to_string())
-            })
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(random_name);
+        let display_name = match name {
+            Some(name) => Self::validate_name(&name)?,
+            None => fs::read_to_string(&name_path)
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(random_name),
+        };
 
         let key = match fs::read_to_string(&key_path) {
             Ok(pem) => KeyPair::from_pem(&pem).context("load identity key")?,
@@ -78,11 +115,49 @@ impl Identity {
         let key_der = key.serialize_der();
         Ok(Self {
             device_id: Self::fingerprint(&cert_der),
-            name: display_name,
+            name: NameCell::new(display_name),
             cert_der,
             key_der,
             dir,
         })
+    }
+
+    /// Current display name.
+    pub fn name(&self) -> String {
+        self.name.get()
+    }
+
+    /// Rename notifications; the payload is a generation counter.
+    pub fn subscribe_name(&self) -> watch::Receiver<u64> {
+        self.name.changed.subscribe()
+    }
+
+    /// Persist a new name and notify holders. The certificate, and therefore the device id,
+    /// stays untouched.
+    pub fn set_name(&self, name: &str) -> Result<()> {
+        let name = Self::validate_name(name)?;
+        let name_path = self.dir.join("name.txt");
+        fs::write(&name_path, &name)
+            .with_context(|| format!("persist name to {}", name_path.display()))?;
+        self.name.set(name);
+        Ok(())
+    }
+
+    /// Trim and bound a display name. Control characters are rejected: names appear in
+    /// terminals, desktop rows and mDNS labels.
+    pub fn validate_name(raw: &str) -> Result<String> {
+        let name = raw.trim();
+        if name.is_empty() {
+            bail!("device name cannot be empty");
+        }
+        let len = name.chars().count();
+        if len > MAX_NAME_LEN {
+            bail!("device name is {len} characters; the limit is {MAX_NAME_LEN}");
+        }
+        if name.chars().any(char::is_control) {
+            bail!("device name cannot contain control characters");
+        }
+        Ok(name.to_string())
     }
 
     pub fn cert_chain(&self) -> Vec<quinn::rustls::pki_types::CertificateDer<'static>> {
