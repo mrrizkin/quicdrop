@@ -12,7 +12,6 @@ repository = "https://github.com/mrrizkin/quicdrop"
 
 [workspace.dependencies]
 anyhow = "1"
-thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"

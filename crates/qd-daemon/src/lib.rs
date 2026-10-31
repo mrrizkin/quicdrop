@@ -4,7 +4,6 @@
 use anyhow::{bail, Context, Result};
 use qd_core::approval::{self, ApprovalRequest, Decision, APPROVAL_TIMEOUT};
 use qd_core::client::{self, SendOpts};
-use qd_core::proto::FileMeta;
 use qd_core::server::{self, Policy, RunningServer, RuntimeSettings, ServerEvent, ServerEventSink};
 use qd_core::{
     discovery, net, Identity, Peer, TrustStore, DEFAULT_DISCOVERY_PORT, DEFAULT_QUIC_PORT,
@@ -26,7 +25,7 @@ pub use api::router;
 pub const DEFAULT_API_PORT: u16 = 53319;
 pub const API_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-fn now_secs() -> u64 {
+pub(crate) fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -355,7 +354,7 @@ impl Inner {
         };
         if let Ok(mut transfers) = self.transfers.lock() {
             transfers.push(view.clone());
-            // Keep the history bounded; old entries are not interesting.
+            // Bound history so a long-lived daemon does not grow without limit.
             if transfers.len() > 200 {
                 let excess = transfers.len() - 200;
                 transfers.drain(0..excess);
@@ -556,7 +555,6 @@ impl Daemon {
             cfg.quic_port
         );
 
-        // Peer discovery updates feed the peer list.
         let mut peers_rx = std::mem::replace(
             &mut running.discovery.peers,
             tokio::sync::mpsc::unbounded_channel().1,
@@ -613,13 +611,6 @@ impl Daemon {
         &self.inner
     }
 
-    pub fn config(&self) -> DaemonConfigView {
-        DaemonConfigView {
-            out_dir: self.inner.runtime.out_dir(),
-            policy: self.inner.runtime.policy(),
-        }
-    }
-
     /// Wait until [`Daemon::shutdown`] (or the API `POST /api/shutdown`).
     pub async fn wait(&self) {
         let mut rx = self.inner.shutdown.subscribe();
@@ -645,12 +636,6 @@ impl Daemon {
             let _ = std::fs::remove_file(&self.info_path);
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct DaemonConfigView {
-    pub out_dir: PathBuf,
-    pub policy: Policy,
 }
 
 fn write_daemon_info(path: &Path, addr: SocketAddr, token: &str) -> Result<()> {
@@ -740,11 +725,9 @@ fn server_event_sink(inner: Arc<Inner>) -> ServerEventSink {
             peer_id,
             session,
             id,
-            name,
             done,
-            size,
+            ..
         } => {
-            let _ = (name, size);
             if let Some(transfer) = inner.transfer_id(&peer_id, session) {
                 inner.set_file(&transfer, id as usize, Some(done), None);
             }
@@ -951,44 +934,17 @@ pub async fn resolve_target(
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
-    // Last resort: a short-lived lookup for peers the running instance cannot see.
-    let mut disc = discovery::start(
-        inner.identity.clone(),
-        inner.quic_port,
-        inner.discovery_port,
-        false,
-    )
-    .await?;
-    let found = discovery::find_peer(&mut disc, target, timeout).await;
-    disc.stop()?;
-    let peer = match found {
-        Ok(peer) => peer,
-        Err(e) => {
-            // A bare hostname may still resolve through the DNS search domain.
-            return match net::resolve_target_addr(target, inner.quic_port).await {
-                Some(addr) => Ok((addr, None, target.to_string())),
-                None => Err(e),
-            };
-        }
+    // A bare hostname may still resolve through the DNS search domain.
+    if let Some(addr) = net::resolve_target_addr(target, inner.quic_port).await {
+        return Ok((addr, None, target.to_string()));
+    }
+    let seen = inner.peers();
+    let seen = if seen.is_empty() {
+        "nothing".to_string()
+    } else {
+        peer_choices(&seen)
     };
-    Ok((
-        peer.addr,
-        Some(peer.device_id.clone()),
-        format!("{} ({})", peer.name, peer.short_id()),
-    ))
-}
-
-/// Files offered by a sender, as transfer history entries.
-pub fn file_views(files: &[FileMeta]) -> Vec<FileView> {
-    files
-        .iter()
-        .map(|f| FileView {
-            name: f.name.clone(),
-            size: f.size,
-            done: 0,
-            ok: None,
-        })
-        .collect()
+    bail!("peer '{target}' not found (saw: {seen})")
 }
 
 /// Helper for the API: start an outbound transfer and return its id.
@@ -1002,10 +958,7 @@ pub async fn spawn_send(
 ) -> String {
     // Expand once so the transfer list shows real files, with real sizes. The walk
     // blocks, so it runs off the runtime and its result is handed to `client::send`.
-    let walk = {
-        let paths = paths.clone();
-        tokio::task::spawn_blocking(move || qd_core::source::expand(&paths)).await
-    };
+    let walk = tokio::task::spawn_blocking(move || qd_core::source::expand(&paths)).await;
     let (sources, walk_error) = match walk {
         Ok(Ok(sources)) => (sources, None),
         Ok(Err(e)) => (Vec::new(), Some(format!("{e:#}"))),
@@ -1073,7 +1026,7 @@ pub async fn spawn_send(
         let opts = SendOpts {
             addr,
             device_id,
-            files: paths,
+            files: Vec::new(),
             concurrency: concurrency.max(1),
             quiet: true,
             name: Some(state.identity.name()),

@@ -63,13 +63,6 @@ pub struct Discovery {
     daemon: ServiceDaemon,
 }
 
-impl Discovery {
-    pub fn stop(&self) -> Result<()> {
-        let _ = self.daemon.shutdown();
-        Ok(())
-    }
-}
-
 impl Drop for Discovery {
     fn drop(&mut self) {
         // Closing the browse channel also ends the mDNS reader thread.

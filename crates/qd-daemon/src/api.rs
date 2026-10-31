@@ -139,10 +139,6 @@ struct Limit {
 }
 
 async fn status(State(inner): State<Arc<Inner>>) -> Json<Value> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
     let counts = inner.counts();
     Json(json!({
         "name": inner.identity.name(),
@@ -157,7 +153,7 @@ async fn status(State(inner): State<Arc<Inner>>) -> Json<Value> {
         "config_dir": qd_core::Identity::config_dir().display().to_string(),
         "out_dir": inner.runtime.out_dir(),
         "policy": inner.runtime.policy(),
-        "uptime_secs": now.saturating_sub(inner.started_at),
+        "uptime_secs": crate::now_secs().saturating_sub(inner.started_at),
         "peers": counts.peers,
         "trusted": counts.trusted,
         "pending_approvals": counts.approvals,
@@ -196,7 +192,8 @@ async fn respond_approval(
         if body.remember {
             inner
                 .trust
-                .remember(&view.peer_id, &view.peer_name, &view.peer_platform)
+                .remember_async(&view.peer_id, &view.peer_name, &view.peer_platform)
+                .await
                 .map_err(|e| {
                     ApiError(
                         StatusCode::INTERNAL_SERVER_ERROR,
@@ -233,11 +230,12 @@ async fn trust_add(
         .unwrap_or_else(|| format!("device {}", &body.device_id[..8.min(body.device_id.len())]));
     inner
         .trust
-        .remember(
+        .remember_async(
             &body.device_id,
             &name,
             body.platform.as_deref().unwrap_or(""),
         )
+        .await
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
     inner.broadcast(DaemonEvent::Trust {
         peers: inner.trusted_peers(),
@@ -268,7 +266,7 @@ async fn send(
         return Err(bad_request("no paths given"));
     }
     for path in &body.paths {
-        match std::fs::metadata(path) {
+        match tokio::fs::metadata(path).await {
             Ok(meta) if meta.is_file() || meta.is_dir() => {}
             Ok(_) => {
                 return Err(bad_request(format!(
@@ -331,7 +329,8 @@ async fn patch_config(
     Json(body): Json<ConfigPatch>,
 ) -> Result<Json<Value>, ApiError> {
     if let Some(dir) = &body.out_dir {
-        std::fs::create_dir_all(dir)
+        tokio::fs::create_dir_all(dir)
+            .await
             .map_err(|e| bad_request(format!("cannot create {}: {e}", dir.display())))?;
         inner.runtime.set_out_dir(dir.clone());
     }

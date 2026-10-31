@@ -35,7 +35,7 @@ async fn offer(
         },
     )
     .await?;
-    match proto::read_frame(&mut ctrl_recv).await? {
+    match proto::read_msg::<Frame>(&mut ctrl_recv).await? {
         Frame::Hello { .. } => {}
         other => panic!("expected hello, got {other:?}"),
     }
@@ -48,7 +48,7 @@ async fn offer(
         proto::MAX_OFFER_FRAME,
     )
     .await?;
-    match proto::read_frame(&mut ctrl_recv).await? {
+    match proto::read_msg::<Frame>(&mut ctrl_recv).await? {
         Frame::Accept { .. } => {}
         other => panic!("expected accept, got {other:?}"),
     }

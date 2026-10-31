@@ -128,10 +128,6 @@ impl Progress {
         }
     }
 
-    pub fn total(&self) -> u64 {
-        self.total
-    }
-
     pub fn add(&self, n: u64) {
         let done = self.done.fetch_add(n, Ordering::Relaxed) + n;
         if let Some(sink) = &self.sink {

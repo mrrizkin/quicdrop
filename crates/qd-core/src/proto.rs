@@ -3,6 +3,7 @@
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 /// ALPN identifier; bumped when the wire format changes incompatibly.
 pub const ALPN: &[u8] = b"quicdrop/1";
@@ -22,6 +23,8 @@ pub const CHUNK_SIZE: usize = 512 * 1024;
 pub const MAX_FRAME: usize = 4 * 1024 * 1024;
 /// Upper bound for an `Offer`, which carries one entry per file.
 pub const MAX_OFFER_FRAME: usize = 16 * 1024 * 1024;
+/// Upper bound for entries in one `Offer`.
+pub const MAX_OFFER_FILES: usize = 100_000;
 /// Longest relative path a peer may announce. With [`MAX_OFFER_FRAME`] it bounds
 /// what a single offer can weigh.
 pub const MAX_NAME_LEN: usize = 1024;
@@ -74,7 +77,7 @@ pub enum Frame {
     Bye,
 }
 
-/// Bytes carried by one stream chunk.
+/// Bytes one stream carries before the next chunk. The transport window leaves room for it.
 pub const CHUNK_STREAM_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Streams one file may use at once. The transport allows far more; this keeps a
@@ -145,16 +148,22 @@ pub async fn write_frame(send: &mut quinn::SendStream, frame: &Frame) -> Result<
     write_msg(send, frame).await
 }
 
-pub async fn read_frame(recv: &mut quinn::RecvStream) -> Result<Frame> {
-    read_msg(recv).await
-}
-
 /// Reject an offer whose announced paths do not fit the limits both sides enforce.
 pub fn validate_offer(files: &[FileMeta]) -> Result<()> {
     if files.is_empty() {
         bail!("offer has no files");
     }
+    if files.len() > MAX_OFFER_FILES {
+        bail!(
+            "offer has {} files, limit is {MAX_OFFER_FILES}",
+            files.len()
+        );
+    }
+    let mut ids = HashSet::with_capacity(files.len());
     for file in files {
+        if !ids.insert(file.id) {
+            bail!("offer repeats file id {}", file.id);
+        }
         if file.name.len() > MAX_NAME_LEN {
             bail!(
                 "announced path is {} bytes, limit is {MAX_NAME_LEN}",
@@ -284,8 +293,7 @@ mod tests {
     #[test]
     fn offers_have_room_for_the_file_limit() {
         // Every file in a full offer must have room for a short path.
-        let source = crate::source::MAX_FILES;
-        let per_file = MAX_OFFER_FRAME / source;
+        let per_file = MAX_OFFER_FRAME / MAX_OFFER_FILES;
         assert!(per_file >= 160, "only {per_file} bytes per file");
     }
 
@@ -304,5 +312,6 @@ mod tests {
         };
         assert!(validate_offer(&[long]).is_err());
         assert!(validate_offer(&[]).is_err());
+        assert!(validate_offer(&[ok.clone(), ok.clone()]).is_err());
     }
 }

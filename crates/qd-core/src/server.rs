@@ -26,6 +26,8 @@ use crate::util::{human_bytes, human_rate, sanitize_rel_path, unique_path, wire_
 const WRITE_AHEAD: usize = 3;
 /// Minimum interval between per-file progress events.
 const FILE_PROGRESS_INTERVAL_MS: u64 = 100;
+/// Upper bound for the resume sidecar read from disk.
+const MAX_SIDECAR_BYTES: u64 = 1024 * 1024;
 
 /// What to do with a transfer from a device that is not in the trust store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -430,7 +432,6 @@ async fn handle_connection(
     identity: Arc<Identity>,
     opts: Arc<ServerOpts>,
 ) -> Result<()> {
-    let opts = Arc::new((*opts).clone());
     let (mut ctrl_send, mut ctrl_recv) = conn.accept_bi().await.context("accept control stream")?;
 
     let hello: Frame = proto::read_msg(&mut ctrl_recv).await?;
@@ -545,8 +546,8 @@ async fn handle_connection(
         tokio::fs::create_dir_all(&parent)
             .await
             .with_context(|| format!("create {}", parent.display()))?;
-        // Resume: continue from a leftover partial file instead of creating "name (1)".
-        let (dest, offset) = match same_partial(&parent, &file_name, meta.size).await? {
+        // Resume: continue from a leftover QuicDrop partial instead of creating "name (1)".
+        let (dest, len) = match same_partial(&parent, &file_name, meta.size).await? {
             Some(existing) => {
                 let len = tokio::fs::metadata(&existing)
                     .await
@@ -558,13 +559,19 @@ async fn handle_connection(
         };
         // A split transfer may leave holes when it is interrupted; only resume from
         // the contiguous prefix the receiver can prove it wrote.
-        let offset = trusted_prefix(&dest, offset).await;
+        let offset = trusted_prefix(&dest, len).await;
+        let count = proto::chunk_count(offset, meta.size);
+        // Only split files need a marker; adding one to every small file would double
+        // the filesystem traffic of a many-file transfer.
+        if count > 1 && (len == 0 || offset == 0) {
+            // The marker proves to a later run that the leftover file belongs to us.
+            let _ = tokio::fs::write(sidecar_path(&dest), b"").await;
+        }
         total += meta.size.saturating_sub(offset);
         accepted.push(AcceptFile {
             id: meta.id,
             offset,
         });
-        let count = proto::chunk_count(offset, meta.size);
         plan.push(PlannedFile {
             session,
             meta,
@@ -584,26 +591,6 @@ async fn handle_connection(
         },
     )
     .await?;
-
-    let plan = Arc::new(plan);
-    let index: Arc<HashMap<u32, Arc<PlannedFile>>> = Arc::new(
-        plan.iter()
-            .map(|p| {
-                (
-                    p.meta.id,
-                    Arc::new(PlannedFile {
-                        session: p.session,
-                        meta: p.meta.clone(),
-                        dest: p.dest.clone(),
-                        label: p.label.clone(),
-                        offset: p.offset,
-                        flight: p.flight.clone(),
-                        events: p.events.clone(),
-                    }),
-                )
-            })
-            .collect(),
-    );
 
     let progress = Arc::new(match &opts.events {
         Some(sink) => {
@@ -646,11 +633,15 @@ async fn handle_connection(
             },
         );
     }
+    let expected = plan.len();
+    let index: Arc<HashMap<u32, Arc<PlannedFile>>> = Arc::new(
+        plan.into_iter()
+            .map(|planned| (planned.meta.id, Arc::new(planned)))
+            .collect(),
+    );
     let reporter = progress.clone();
     let quiet = opts.quiet;
     let reporter_handle = tokio::spawn(async move { reporter.run(quiet).await });
-
-    let expected = plan.len();
     let mut finished = 0usize;
     let mut transferred = 0u64;
     let mut failures = 0usize;
@@ -699,7 +690,7 @@ async fn handle_connection(
                     Ok((send, recv)) => {
                         let index = index.clone();
                         let progress = progress.clone();
-                        let task_opts = (*opts).clone();
+                        let task_opts = opts.clone();
                         let peer_id = sender_id.clone();
                         set.spawn(async move {
                             receive_segment(send, recv, index, progress, task_opts, peer_id).await
@@ -826,11 +817,21 @@ async fn decide(
     }
 }
 
-/// Find an existing partial file with the expected final size.
+/// Find a leftover QuicDrop partial that can still take more bytes.
 async fn same_partial(dir: &std::path::Path, name: &str, size: u64) -> Result<Option<PathBuf>> {
     let candidate = dir.join(name);
+    let marker = sidecar_path(&candidate);
     match tokio::fs::metadata(&candidate).await {
-        Ok(meta) if meta.is_file() && meta.len() < size => Ok(Some(candidate)),
+        Ok(meta)
+            if meta.is_file()
+                && meta.len() <= size
+                && tokio::fs::metadata(&marker)
+                    .await
+                    .map(|marker| marker.is_file())
+                    .unwrap_or(false) =>
+        {
+            Ok(Some(candidate))
+        }
         _ => Ok(None),
     }
 }
@@ -840,7 +841,7 @@ async fn receive_segment(
     mut recv: quinn::RecvStream,
     index: Arc<HashMap<u32, Arc<PlannedFile>>>,
     progress: Arc<Progress>,
-    opts: ServerOpts,
+    opts: Arc<ServerOpts>,
     peer_id: String,
 ) -> Vec<SegmentOutcome> {
     // One stream carries one or more chunk units, so a batch of small files needs a
@@ -894,6 +895,9 @@ async fn write_segment(
     let expected = planned.meta.size;
     let offset = planned.offset.min(expected);
     let count = proto::chunk_count(offset, expected);
+    if header.session != planned.session {
+        bail!("file header session does not match the accepted session");
+    }
     if header.size != expected || header.count != count || header.index >= count {
         bail!(
             "chunk {}/{} does not match the accepted plan ({count} expected)",
@@ -1026,10 +1030,21 @@ fn write_to_disk(
 
 /// Contiguous prefix proven by the ranges recorded next to a split partial file.
 async fn trusted_prefix(dest: &std::path::Path, len: u64) -> u64 {
+    if len == 0 {
+        return 0;
+    }
+    let sidecar = sidecar_path(dest);
+    let Ok(meta) = tokio::fs::metadata(&sidecar).await else {
+        return 0;
+    };
+    if !meta.is_file() || meta.len() > MAX_SIDECAR_BYTES {
+        return 0;
+    }
+    // A single chunk is written sequentially from zero, so its length is the prefix.
     if len <= proto::CHUNK_STREAM_BYTES {
         return len;
     }
-    let Ok(text) = tokio::fs::read_to_string(sidecar_path(dest)).await else {
+    let Ok(text) = tokio::fs::read_to_string(&sidecar).await else {
         return 0;
     };
     let mut ranges: Vec<(u64, u64)> = text
@@ -1122,15 +1137,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn small_partials_are_trusted_as_is() {
+    fn marked_single_chunk_partials_are_trusted() {
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("small.bin");
         std::fs::write(&dest, vec![0u8; 1024]).unwrap();
+        std::fs::write(sidecar_path(&dest), b"").unwrap();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
         assert_eq!(runtime.block_on(trusted_prefix(&dest, 1024)), 1024);
+    }
+
+    #[test]
+    fn unmarked_files_are_not_resumed() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("user.bin");
+        std::fs::write(&dest, vec![0u8; 1024]).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        assert_eq!(runtime.block_on(trusted_prefix(&dest, 1024)), 0);
     }
 
     #[test]

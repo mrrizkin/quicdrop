@@ -1237,7 +1237,6 @@ version = "2026.44.14"
 dependencies = [
  "anyhow",
  "clap",
- "dirs",
  "humantime",
  "qd-core",
  "tokio",
@@ -1264,7 +1263,6 @@ dependencies = [
  "serde_json",
  "socket2",
  "tempfile",
- "thiserror",
  "tokio",
  "tracing",
 ]
@@ -1277,7 +1275,6 @@ dependencies = [
  "axum",
  "blake3",
  "clap",
- "dirs",
  "getrandom 0.4.3",
  "hex",
  "qd-core",

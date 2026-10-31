@@ -139,7 +139,7 @@ async fn crafted_traversal_names_stay_inside_out_dir() -> Result<()> {
         },
     )
     .await?;
-    let _: Frame = proto::read_frame(&mut ctrl_recv).await?;
+    let _: Frame = proto::read_msg::<Frame>(&mut ctrl_recv).await?;
 
     let session = [7u8; 16];
     let files = vec![
@@ -157,7 +157,7 @@ async fn crafted_traversal_names_stay_inside_out_dir() -> Result<()> {
         },
     ];
     proto::write_frame(&mut ctrl_send, &Frame::Offer { session, files }).await?;
-    match proto::read_frame(&mut ctrl_recv).await? {
+    match proto::read_msg::<Frame>(&mut ctrl_recv).await? {
         Frame::Accept { files, .. } => assert_eq!(files.len(), 2),
         other => panic!("expected accept, got {other:?}"),
     }
@@ -186,7 +186,7 @@ async fn crafted_traversal_names_stay_inside_out_dir() -> Result<()> {
         }
     }
 
-    let _ = proto::read_frame(&mut ctrl_recv).await?;
+    let _ = proto::read_msg::<Frame>(&mut ctrl_recv).await?;
     let _ = proto::write_frame(&mut ctrl_send, &Frame::Bye).await;
     let _ = ctrl_send.finish();
     conn.close(0u32.into(), b"done");
@@ -209,10 +209,12 @@ async fn resume_works_for_nested_paths() -> Result<()> {
     let body = vec![42u8; 512 * 1024];
     std::fs::write(tree.join("sub/big.bin"), &body)?;
 
-    // Pre-seed a truncated partial where the receiver will look for it.
+    // Pre-seed a truncated partial where the receiver will look for it, including the
+    // sidecar marker a previous interrupted transfer would have left.
     let partial = h.out.join("docs/sub/big.bin");
     std::fs::create_dir_all(partial.parent().unwrap())?;
     std::fs::write(&partial, &body[..200 * 1024])?;
+    std::fs::write(partial.with_extension("bin.qdp"), b"")?;
 
     let summary = h.send_paths(vec![tree]).await?;
     assert_eq!(summary.ok, 1, "{summary:?}");

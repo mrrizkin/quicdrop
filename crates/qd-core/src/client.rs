@@ -219,11 +219,10 @@ pub async fn send(opts: SendOpts) -> Result<Summary> {
 
     let accepted_total: u64 = accepted
         .iter()
-        .filter_map(|a| {
+        .filter_map(|accepted| {
             metas
-                .iter()
-                .find(|m| m.id == a.id)
-                .map(|m| m.size.saturating_sub(a.offset))
+                .get(accepted.id as usize)
+                .map(|meta| meta.size.saturating_sub(accepted.offset))
         })
         .sum();
 
@@ -556,7 +555,7 @@ async fn write_unit(
     )
     .await?;
 
-    // One blocking task reads the whole chunk sequentially and hands pieces over.
+    // Disk reads block, so one task reads the chunk and hands pieces to the async writer.
     let (tx, mut rx) = mpsc::channel::<std::io::Result<Bytes>>(READ_AHEAD);
     let reader = {
         let path = path.to_path_buf();
@@ -582,7 +581,7 @@ async fn write_unit(
     while let Some(piece) = rx.recv().await {
         let piece = piece.with_context(|| format!("read {}", path.display()))?;
         let n = piece.len() as u64;
-        // Hands the buffer to quinn without copying it.
+        // `Bytes` ownership lets quinn take the buffer without another copy.
         send.write_chunk(piece).await.context("write file chunk")?;
         written += n;
         progress.add(n);

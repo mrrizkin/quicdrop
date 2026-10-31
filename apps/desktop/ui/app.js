@@ -125,7 +125,7 @@ function loadPrefs() {
   try {
     Object.assign(prefs, JSON.parse(localStorage.getItem(PREFS_KEY) || "{}"));
   } catch (_) {
-    /* first run */
+    /* Corrupt or unavailable storage falls back to defaults. */
   }
   applyPrefs();
 }
@@ -134,7 +134,7 @@ function savePrefs() {
   try {
     localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
   } catch (_) {
-    /* ignore */
+    /* Private mode or a full quota must not block the UI. */
   }
   applyPrefs();
 }
@@ -1085,7 +1085,7 @@ async function openSettings() {
   try {
     state.config = await api("GET", "/api/config");
   } catch (_) {
-    /* use cached */
+    /* Keep the last known config while the daemon is unreachable. */
   }
   const info = state.info || {};
   $("settings-name").value = info.name || "";

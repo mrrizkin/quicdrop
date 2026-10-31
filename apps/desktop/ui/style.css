@@ -1229,7 +1229,7 @@ select.input {
   }
 }
 
-/* settings */
+/* -------------------------------------------------------------- settings --- */
 .modal.settings {
   width: 640px;
   max-width: calc(100vw - 48px);

@@ -18,4 +18,3 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 clap = { version = "4.6.7", features = ["derive"] }
 humantime = "2.4.0"
-dirs = "7.0.0"

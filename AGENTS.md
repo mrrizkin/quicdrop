@@ -1,5 +1,7 @@
 # Agent Instructions
 
+## Commands
+
 ```bash
 just verify    # fmt check, clippy, workspace tests
 just build     # release build of qd and quicdropd
@@ -25,3 +27,7 @@ just desktop   # run the Tauri app
 - Commit no build output, keys, `.env`, or local state.
 - Never `pkill -f` a pattern that matches the invoking shell.
 - Version tags are `v<YEAR>.<ISO week>.<patch>` in UTC, cut with `just tag`.
+
+## Verification
+
+Run `just verify` before finishing a change. Report checks that could not run and why.

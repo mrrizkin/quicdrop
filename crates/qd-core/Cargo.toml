@@ -8,7 +8,6 @@ description = "QUIC file transfer core: protocol, discovery, addressing, and res
 
 [dependencies]
 anyhow.workspace = true
-thiserror.workspace = true
 serde.workspace = true
 tokio.workspace = true
 tracing.workspace = true

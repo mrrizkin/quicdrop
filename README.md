@@ -1,9 +1,9 @@
 # quicdrop
 
-Peer-to-peer file transfer over QUIC. Devices on the same link discover each other;
-elsewhere, send by hostname or address.
+Peer-to-peer file transfer over QUIC. Devices on the same link discover each other; elsewhere,
+send by hostname or address.
 
-```
+```console
 $ qd receive
 qd receiving as "laptop" (4d915ba1) on 192.168.1.42:53320
 
@@ -12,12 +12,6 @@ $ qd send photos --to laptop
   ok      photos/2024/beach.jpg (3.98 MiB)
 sent 2 / 2 files in 0.4s (20.4 MiB/s)
 ```
-
-## Why QUIC
-
-One stream per file removes the request queue and TCP head-of-line blocking that per-file
-HTTP transfers pay. A lost packet stalls one file, not the session. Byte offsets make resume
-free, and connection migration survives a Wi-Fi to hotspot switch.
 
 ## Install
 
@@ -28,7 +22,7 @@ cargo build --release
 
 Rust 1.82+. Linux, macOS, Windows.
 
-Prebuilt, from the [releases page](https://github.com/mrrizkin/quicdrop/releases):
+Prebuilt assets from the [releases page](https://github.com/mrrizkin/quicdrop/releases):
 
 | Asset | Contains |
 | --- | --- |
@@ -50,32 +44,52 @@ qd trust [add <ID> | rm <ID> | list]
 qd id
 ```
 
-`--to` takes a device name, device id prefix, hostname, IP, or `ip:port`. Hostnames resolve
-through DNS, so a Tailscale MagicDNS name (`host.tailnet.ts.net`) or a `100.x` address works
+`--to` takes a device name, device id prefix, hostname, IP, or `ip:port`:
+
+```bash
+qd send report.pdf --to "Brave Otter"
+qd send report.pdf --to 4d915ba1
+qd send report.pdf --to laptop.tailnet.ts.net
+qd send report.pdf --to 192.168.1.42:53320
+```
+
+Hostnames resolve through DNS, including Tailscale MagicDNS names and `100.x` addresses,
 when UDP 53320 is reachable between nodes. Sending by address skips discovery and
-certificate pinning. Folders are walked recursively, symlinks skipped, relative paths
-recreated on the receiver; an existing file becomes `name (1).ext`.
+certificate pinning.
+
+Folders are walked recursively, symlinks skipped, and relative paths recreated on the
+receiver. An existing unrelated file becomes `name (1).ext`; a leftover QuicDrop partial
+resumes.
 
 Names can repeat; the 8-character id shown next to a name is unique. When a name matches
-several devices, `qd` lists the candidates instead of guessing; send to one of their short
+several devices, `qd` lists the candidates instead of guessing. Send to one of their short
 ids to pick exactly.
 
-State is in `~/.config/quicdrop` (override `QD_CONFIG_DIR`): identity, `name.txt`,
-`trusted.json`. Incoming offers from unknown devices prompt on the terminal, or are rejected
-when there is no terminal. Deleting the directory creates a new device.
+State is in `~/.config/quicdrop` (override `QD_CONFIG_DIR`):
 
-Desktop app:
+| Path | Contents |
+| --- | --- |
+| `identity.key`, `identity.crt` | device certificate and key |
+| `name.txt` | display name |
+| `trusted.json` | approved device ids |
+| `daemon.json` | loopback API address and bearer token |
+
+Incoming offers from unknown devices prompt on the terminal, or are rejected when there is
+no terminal. Deleting the directory creates a new device.
+
+## Desktop app
 
 ```bash
 cargo run --manifest-path apps/desktop/Cargo.toml
 ```
 
-It embeds the daemon (`quicdropd`, loopback API on 53319) and serves a static `ui/`.
-Linux needs `webkit2gtk-4.1`, `gtk+-3.0`, `libsoup-3.0`, `javascriptcoregtk-4.1`. Peer rows
-show their id, and sends target the device id so the certificate is pinned. The Add device
-dialog accepts a hostname or address with an optional label and port. Tailscale peers are
-not discovered automatically, so add them by address. Settings → General renames this
-device without changing its id or trust; Network lists the local addresses, including a
+The app embeds `quicdropd` (loopback API on 53319) and serves the buildless `ui/`. Linux
+needs `webkit2gtk-4.1`, `gtk+-3.0`, `libsoup-3.0`, `javascriptcoregtk-4.1`.
+
+Peer rows show their id, and sends target the device id so the certificate is pinned. The
+Add device dialog accepts a hostname or address with an optional label and port. Tailscale
+peers are not discovered automatically, so add them by address. Settings → General renames
+this device without changing its id or trust; Network lists the local addresses, including a
 Tailscale `100.x` interface, click to copy.
 
 ## Protocol
@@ -92,10 +106,17 @@ length-prefixed postcard frames on the control stream:
 | `Error` / `Bye` | either | terminal |
 
 Each file is cut into 8 MiB chunks that a pool of up to 4 workers sends over its own
-bidirectional stream: `FileHeader{session,id,offset,size,index,count}`, payload,
-`FileTrailer{id,hash}`, then `FileAck{ok,hash,message}`. A chunk is acked as soon as it is
-written; the last ack settles the whole-file digest. Peer discovery uses mDNS and a UDP
-beacon in parallel.
+bidirectional stream:
+
+```text
+FileHeader{session,id,offset,size,index,count}
+payload
+FileTrailer{id,hash}
+FileAck{ok,hash,message}
+```
+
+A chunk is acked as soon as it is written; the last ack settles the whole-file digest. Peer
+discovery uses mDNS and a UDP beacon in parallel.
 
 ## Security
 
@@ -105,7 +126,7 @@ beacon in parallel.
 - Sender-supplied names are relative paths: `..` is stripped, existing files are not
   overwritten.
 
-The receiver does not authenticate the *sender's* certificate, so a trusted device id is
+The receiver does not authenticate the sender's certificate, so a trusted device id is
 scoped to the channel the user approved, not to a signed long-term identity.
 
 ## License

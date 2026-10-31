@@ -96,8 +96,7 @@ impl Identity {
         let cert_der = match fs::read(&cert_path) {
             Ok(der) if !der.is_empty() => der,
             _ => {
-                let (params, der) = build_cert(&display_name, &key)?;
-                let _ = params;
+                let der = build_cert(&display_name, &key)?;
                 fs::write(&cert_path, &der).context("persist identity cert")?;
                 der
             }
@@ -182,7 +181,7 @@ impl Identity {
     }
 }
 
-fn build_cert(name: &str, key: &KeyPair) -> Result<(CertificateParams, Vec<u8>)> {
+fn build_cert(name: &str, key: &KeyPair) -> Result<Vec<u8>> {
     let mut params = CertificateParams::new(vec![
         "localhost".to_string(),
         "quicdrop.local".to_string(),
@@ -200,7 +199,7 @@ fn build_cert(name: &str, key: &KeyPair) -> Result<(CertificateParams, Vec<u8>)>
     params.not_before = date_time_ymd(2020, 1, 1);
     params.not_after = date_time_ymd(9999, 12, 31);
     let cert = params.self_signed(key).context("self-sign certificate")?;
-    Ok((params, cert.der().to_vec()))
+    Ok(cert.der().to_vec())
 }
 
 /// LocalSend-style default: "Brave Otter". Not a secret, only a label.

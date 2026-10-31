@@ -133,7 +133,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Receive { out, policy } => {
-            let out_dir = out.unwrap_or_else(default_out_dir);
+            let out_dir = out.unwrap_or_else(qd_core::util::default_download_dir);
             let mut opts = ServerOpts::new(cli.port, cli.discovery_port, out_dir);
             opts.name = cli.name;
             opts.quiet = cli.quiet;
@@ -206,7 +206,8 @@ async fn main() -> Result<()> {
                     );
                 }
             }
-            disc.stop()
+            drop(disc);
+            Ok(())
         }
         Command::Id => {
             let identity = Identity::load_or_create(cli.name)?;
@@ -296,7 +297,7 @@ async fn resolve_peer(
         eprintln!("looking for \"{target}\" (up to {timeout:?})...");
     }
     let found = qd_core::discovery::find_peer(&mut disc, target, timeout).await;
-    disc.stop()?;
+    drop(disc);
     match found {
         Ok(peer) => {
             let label = format!("{} ({})", peer.name, peer.short_id());
@@ -319,10 +320,6 @@ async fn resolve_peer(
 
 fn parse_duration(s: &str) -> Result<Duration> {
     humantime::parse_duration(s).with_context(|| format!("invalid duration: {s}"))
-}
-
-fn default_out_dir() -> PathBuf {
-    qd_core::util::default_download_dir()
 }
 
 fn init_tracing(verbose: u8) {

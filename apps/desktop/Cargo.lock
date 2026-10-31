@@ -2958,7 +2958,6 @@ dependencies = [
  "serde",
  "serde_json",
  "socket2",
- "thiserror 2.0.21",
  "tokio",
  "tracing",
 ]
@@ -2970,7 +2969,6 @@ dependencies = [
  "anyhow",
  "axum",
  "clap",
- "dirs",
  "getrandom 0.4.3",
  "hex",
  "qd-core",
@@ -2986,7 +2984,6 @@ dependencies = [
 name = "quicdrop-desktop"
 version = "2026.44.14"
 dependencies = [
- "anyhow",
  "qd-core",
  "qd-daemon",
  "reqwest",

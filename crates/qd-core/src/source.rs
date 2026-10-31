@@ -5,11 +5,9 @@ use anyhow::{bail, Context, Result};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use crate::proto::MAX_NAME_LEN;
+use crate::proto::{MAX_NAME_LEN, MAX_OFFER_FILES};
 use crate::util::wire_path;
 
-/// Refuse absurd offers before they reach the peer.
-pub const MAX_FILES: usize = 100_000;
 const MAX_DEPTH: usize = 64;
 
 #[derive(Debug, Clone)]
@@ -147,8 +145,8 @@ fn add_file(
             path.display()
         );
     }
-    if out.len() >= MAX_FILES {
-        bail!("too many files (limit {MAX_FILES})");
+    if out.len() >= MAX_OFFER_FILES {
+        bail!("too many files (limit {MAX_OFFER_FILES})");
     }
     out.push(SourceFile {
         path,

@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use std::io::Read;
 use std::path::Path;
 
-/// Read size for hashing.
+/// Upper bound for each read; small files use their own size instead.
 const HASH_BUFFER: usize = 8 * 1024 * 1024;
 
 /// Hash a file on the blocking pool.
