@@ -135,6 +135,9 @@ const prefs = {
   motion: true,
   openAfter: false,
   addresses: [],
+  probe_enabled: false,
+  probe_interval_secs: 60,
+  probe_concurrency: 2,
 };
 
 function loadPrefs() {
@@ -143,6 +146,9 @@ function loadPrefs() {
   } catch (_) {
     /* Corrupt or unavailable storage falls back to defaults. */
   }
+  prefs.probe_enabled = Boolean(prefs.probe_enabled);
+  prefs.probe_interval_secs = Number(prefs.probe_interval_secs) || 60;
+  prefs.probe_concurrency = Number(prefs.probe_concurrency) || 2;
   applyPrefs();
 }
 
@@ -317,9 +323,13 @@ function linkManualPeer(addr, device_id, platform, label) {
       peer.name = label || addr;
     }
     peer.decline_link = false;
+    probeWarnedMismatches.delete(addr);
     saveManualPrefs();
     recomputeDevices();
     renderPeers();
+    if (prefs.probe_enabled) {
+      runProbeBatch();
+    }
   }
 }
 
@@ -357,6 +367,7 @@ function addManualPeer(rawAddress, label, port) {
 function removeManualPeer(addr) {
   state.manual = state.manual.filter((peer) => peer.addr !== addr);
   delete state.savedRouteStates[addr];
+  probeWarnedMismatches.delete(addr);
   const savedKey = `saved:${addr}`;
   if (state.selectedPeer === savedKey || state.selectedPeer === addr) {
     state.selectedPeer = null;
@@ -1279,6 +1290,12 @@ async function openSettings() {
   $("settings-out").value = state.config.out_dir || "";
   $("settings-policy").value = state.config.policy || "ask";
   $("settings-concurrency").value = String(state.config.concurrency || 8);
+  const probeEnabled = Boolean(prefs.probe_enabled);
+  $("settings-probe-enabled").checked = probeEnabled;
+  $("settings-probe-interval").value = String(prefs.probe_interval_secs || 60);
+  $("settings-probe-concurrency").value = String(prefs.probe_concurrency || 2);
+  $("settings-probe-interval").disabled = !probeEnabled;
+  $("settings-probe-concurrency").disabled = !probeEnabled;
   $("about-version").textContent = info.version || "—";
   $("about-platform").textContent = info.platform || "—";
   $("about-name").textContent = info.name || "—";
@@ -1339,7 +1356,11 @@ async function saveSettings() {
   prefs.density = $("settings-density").value;
   prefs.motion = $("settings-motion").checked;
   prefs.openAfter = $("settings-open-after").checked;
+  prefs.probe_enabled = $("settings-probe-enabled").checked;
+  prefs.probe_interval_secs = Number($("settings-probe-interval").value) || 60;
+  prefs.probe_concurrency = Number($("settings-probe-concurrency").value) || 2;
   savePrefs();
+  syncProbeLoop();
 
   const out_dir = $("settings-out").value.trim();
   const policy = $("settings-policy").value;
@@ -1367,6 +1388,93 @@ async function saveSettings() {
   }
 }
 
+
+let probeTimer = null;
+let probeRunning = false;
+const probeWarnedMismatches = new Set();
+
+async function probeTarget(target) {
+  const addr = target.addr;
+  const device_id = target.device_id;
+  try {
+    const res = await api("POST", "/api/probe", { addr, device_id });
+    if (res && res.ok) {
+      probeWarnedMismatches.delete(addr);
+      if (res.peer) {
+        if (!target.platform && res.peer.platform) {
+          target.platform = res.peer.platform;
+        }
+        if (!target.label && res.peer.name) {
+          target.name = res.peer.name;
+        }
+      }
+      updateSavedRouteLiveState(addr, "live");
+    } else {
+      updateSavedRouteLiveState(addr, "lost");
+      const err = res?.error || "";
+      if (err.includes("device id mismatch")) {
+        if (!probeWarnedMismatches.has(addr)) {
+          probeWarnedMismatches.add(addr);
+          console.warn(`[probe] device id mismatch for ${addr}: ${err}`);
+        }
+      }
+    }
+  } catch (err) {
+    updateSavedRouteLiveState(addr, "lost");
+    console.debug?.(`[probe] error for ${addr}: ${err}`);
+  }
+}
+
+async function runProbeBatch() {
+  if (!prefs.probe_enabled || probeRunning) return;
+  probeRunning = true;
+  try {
+    const targets = (state.manual || []).filter((p) => Boolean(p.device_id));
+    if (targets.length === 0) return;
+
+    const concurrency = Math.max(1, Number(prefs.probe_concurrency) || 2);
+    let index = 0;
+
+    async function worker() {
+      while (index < targets.length) {
+        if (!prefs.probe_enabled) break;
+        const target = targets[index++];
+        await probeTarget(target);
+      }
+    }
+
+    const workerCount = Math.min(concurrency, targets.length);
+    const workers = Array.from({ length: workerCount }, () => worker());
+    await Promise.all(workers);
+  } finally {
+    probeRunning = false;
+  }
+}
+
+function syncProbeLoop() {
+  if (probeTimer) {
+    clearInterval(probeTimer);
+    probeTimer = null;
+  }
+  if (!prefs.probe_enabled) return;
+
+  const intervalMs = Math.max(5, Number(prefs.probe_interval_secs) || 60) * 1000;
+  runProbeBatch();
+  probeTimer = setInterval(runProbeBatch, intervalMs);
+}
+
+$("settings-probe-enabled").addEventListener("change", (e) => {
+  const disabled = !e.target.checked;
+  $("settings-probe-interval").disabled = disabled;
+  $("settings-probe-concurrency").disabled = disabled;
+});
+
+window.addEventListener("beforeunload", () => {
+  if (probeTimer) {
+    clearInterval(probeTimer);
+    probeTimer = null;
+  }
+});
 
 $("btn-theme").addEventListener("click", toggleTheme);
 $("settings-close").addEventListener("click", () => ($("settings-modal").hidden = true));
@@ -1767,6 +1875,7 @@ async function setupDragDrop() {
   await listen("daemon-resync", () => refresh());
   await refresh();
   setupDragDrop();
+  syncProbeLoop();
   // Cheap safety net in case an event was missed while the window was hidden.
   setInterval(refresh, 15000);
 })();

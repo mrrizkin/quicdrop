@@ -254,6 +254,27 @@
                   <option value="16">16</option>
                 </select>
               </label>
+              <label class="check">
+                <input type="checkbox" id="settings-probe-enabled" />
+                <span>Check saved addresses reachability</span>
+              </label>
+              <label class="field">
+                <span>Probe interval</span>
+                <select class="input" id="settings-probe-interval">
+                  <option value="30">30s</option>
+                  <option value="60">60s</option>
+                  <option value="120">2m</option>
+                  <option value="300">5m</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Max concurrent probes</span>
+                <select class="input" id="settings-probe-concurrency">
+                  <option value="1">1</option>
+                  <option value="2">2</option>
+                  <option value="4">4</option>
+                </select>
+              </label>
               <div class="kv">
                 <span>QUIC</span><code id="about-quic">—</code>
                 <span>Discovery</span><code id="about-disc">—</code>

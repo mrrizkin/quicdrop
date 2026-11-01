@@ -34,6 +34,7 @@ pub fn router(inner: Arc<Inner>) -> Router {
         .route("/api/trust", get(trust_list).post(trust_add))
         .route("/api/trust/{id}", delete(trust_remove))
         .route("/api/send", post(send))
+        .route("/api/probe", post(probe))
         .route("/api/config", get(config).patch(patch_config))
         .route("/api/events", get(events))
         .route("/api/shutdown", post(shutdown))
@@ -139,6 +140,13 @@ struct ConfigPatch {
 struct Limit {
     #[serde(default)]
     limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct ProbeRequest {
+    addr: String,
+    #[serde(default)]
+    device_id: Option<String>,
 }
 
 async fn status(State(inner): State<Arc<Inner>>) -> Json<Value> {
@@ -364,6 +372,41 @@ async fn patch_config(
 async fn shutdown(State(inner): State<Arc<Inner>>) -> Json<Value> {
     let _ = inner.shutdown_signal();
     Json(json!({ "ok": true }))
+}
+
+async fn probe(State(inner): State<Arc<Inner>>, Json(body): Json<ProbeRequest>) -> Json<Value> {
+    let device_id = body.device_id.filter(|s| !s.trim().is_empty());
+    let Some(addr) = qd_core::net::resolve_target_addr(&body.addr, inner.quic_port).await else {
+        return Json(json!({
+            "ok": false,
+            "peer": null,
+            "error": format!("cannot resolve address: {}", body.addr),
+        }));
+    };
+
+    let opts = qd_core::client::SendOpts {
+        addr,
+        device_id,
+        identity: Some(inner.identity.clone()),
+        name: Some(inner.identity.name()),
+        ..Default::default()
+    };
+
+    match qd_core::client::probe(opts).await {
+        Ok(peer) => Json(json!({
+            "ok": true,
+            "peer": peer,
+            "error": null,
+        })),
+        Err(e) => {
+            tracing::debug!(addr = %body.addr, error = %e, "probe failed");
+            Json(json!({
+                "ok": false,
+                "peer": null,
+                "error": e.to_string(),
+            }))
+        }
+    }
 }
 
 fn hello_event(inner: &Arc<Inner>) -> DaemonEvent {

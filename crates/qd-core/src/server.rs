@@ -463,8 +463,6 @@ async fn handle_connection(
         }
         other => bail!("expected hello, got {other:?}"),
     };
-    info!("incoming transfer from \"{sender_name}\" ({sender_id})");
-
     proto::write_frame(
         &mut ctrl_send,
         &Frame::Hello {
@@ -478,9 +476,12 @@ async fn handle_connection(
 
     let offer: Frame = proto::read_msg_limit(&mut ctrl_recv, proto::MAX_OFFER_FRAME).await?;
     let (session, files) = match offer {
-        Frame::Offer { session, files } => (session, files),
+        Frame::Offer { session, files } => {
+            info!("incoming transfer from \"{sender_name}\" ({sender_id})");
+            (session, files)
+        }
         Frame::Bye => {
-            info!("sender disconnected before offering files");
+            debug!("probe from \"{sender_name}\" ({sender_id}), no files offered");
             return Ok(());
         }
         other => bail!("expected offer, got {other:?}"),

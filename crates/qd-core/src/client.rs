@@ -459,6 +459,142 @@ pub async fn send(opts: SendOpts) -> Result<Summary> {
     Ok(summary)
 }
 
+/// Lightweight probe to check peer reachability and identity without sending files.
+pub async fn probe(opts: SendOpts) -> Result<CapturedPeer> {
+    probe_timeout(opts, Duration::from_secs(3)).await
+}
+
+/// Lightweight probe by address and expected device id.
+pub async fn probe_peer(
+    addr: SocketAddr,
+    expected_device_id: Option<String>,
+    timeout: Duration,
+) -> Result<CapturedPeer> {
+    probe_timeout(
+        SendOpts {
+            addr,
+            device_id: expected_device_id,
+            ..Default::default()
+        },
+        timeout,
+    )
+    .await
+}
+
+pub async fn probe_timeout(opts: SendOpts, timeout: Duration) -> Result<CapturedPeer> {
+    tokio::time::timeout(timeout, async {
+        let cert_slot = Arc::new(std::sync::Mutex::new(None));
+        let client_cfg = crate::net::client_config_with_captured(
+            opts.device_id.clone(),
+            Some(cert_slot.clone()),
+        )?;
+        let endpoint = crate::net::client_endpoint(client_cfg)?;
+
+        let connecting = endpoint
+            .connect(opts.addr, "quicdrop.local")
+            .with_context(|| format!("connect to {}", opts.addr))?;
+        let conn = match connecting.await {
+            Ok(conn) => conn,
+            Err(quinn::ConnectionError::TimedOut) => bail!("{} did not answer", opts.addr),
+            Err(e) => {
+                if let Some(expected) = opts.device_id.as_deref().filter(|e| !e.is_empty()) {
+                    if let Some(actual) = cert_slot.lock().ok().and_then(|s| s.clone()) {
+                        if !actual.starts_with(expected) {
+                            bail!(
+                                "device id mismatch: peer certificate is {actual}, expected {expected}"
+                            );
+                        }
+                    }
+                }
+                let err_str = e.to_string();
+                if err_str.contains("device id mismatch") {
+                    bail!("{err_str}");
+                }
+                bail!("handshake with {} failed: {e}", opts.addr);
+            }
+        };
+
+        let identity = match &opts.identity {
+            Some(identity) => identity.as_ref().clone(),
+            None => {
+                let name = opts.name.clone();
+                tokio::task::spawn_blocking(move || Identity::load_or_create(name))
+                    .await
+                    .context("load identity")??
+            }
+        };
+
+        let (mut ctrl_send, mut ctrl_recv) =
+            conn.open_bi().await.context("open control stream")?;
+        proto::write_frame(
+            &mut ctrl_send,
+            &Frame::Hello {
+                version: proto::PROTO_VERSION,
+                device_id: identity.device_id.clone(),
+                name: identity.name(),
+                platform: Identity::platform().to_string(),
+            },
+        )
+        .await?;
+
+        let peer_hello: Frame = proto::read_msg(&mut ctrl_recv).await?;
+        let (peer_name, peer_platform, peer_device_id) = match peer_hello {
+            Frame::Hello {
+                name,
+                version,
+                device_id,
+                platform,
+            } => {
+                if version != proto::PROTO_VERSION {
+                    bail!(
+                        "peer speaks protocol v{version}, we speak v{}",
+                        proto::PROTO_VERSION
+                    );
+                }
+                let cert_fingerprint = cert_slot
+                    .lock()
+                    .ok()
+                    .and_then(|s| s.clone())
+                    .unwrap_or_default();
+                if !cert_fingerprint.is_empty() && device_id != cert_fingerprint {
+                    bail!(
+                        "device id mismatch: peer reported device id {device_id} does not match certificate fingerprint {cert_fingerprint}"
+                    );
+                }
+                let captured_id = if cert_fingerprint.is_empty() {
+                    device_id
+                } else {
+                    cert_fingerprint
+                };
+                (name, platform, captured_id)
+            }
+            Frame::Error { message } => bail!("peer error: {message}"),
+            other => bail!("unexpected reply: {other:?}"),
+        };
+
+        let _ = proto::write_frame(&mut ctrl_send, &Frame::Bye).await;
+        let _ = ctrl_send.finish();
+        conn.close(0u32.into(), b"probe done");
+
+        let captured = CapturedPeer {
+            device_id: peer_device_id,
+            name: peer_name,
+            platform: peer_platform,
+        };
+        if let Some(slot) = &opts.captured_peer {
+            if let Ok(mut lock) = slot.lock() {
+                *lock = Some(captured.clone());
+            }
+        }
+        if let Some(on_handshake) = &opts.on_handshake {
+            on_handshake(&captured);
+        }
+        Ok(captured)
+    })
+    .await
+    .map_err(|_| anyhow!("probe timed out"))?
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn send_one(
     conn: &quinn::Connection,
