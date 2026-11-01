@@ -18,6 +18,43 @@ use crate::proto::{BROADCAST_MAGIC, MDNS_SERVICE, MULTICAST_GROUP, PROTO_VERSION
 pub const BEACON_INTERVAL: Duration = Duration::from_secs(3);
 pub const PEER_TTL: Duration = Duration::from_secs(12);
 
+/// Cap on tracked mDNS `fullname -> device` pairs. Names come from the network, so the
+/// index is bounded; evicting a pair at worst delays one `Lost` for that service.
+const MAX_MDNS_ENTRIES: usize = 256;
+
+/// `fullname -> device_id` index that turns mDNS `ServiceRemoved` into `Lost` events.
+struct FullnameIndex {
+    by_fullname: HashMap<String, String>,
+}
+
+impl FullnameIndex {
+    fn new() -> Self {
+        Self {
+            by_fullname: HashMap::new(),
+        }
+    }
+
+    fn track(&mut self, fullname: &str, device_id: &str) {
+        if !self.by_fullname.contains_key(fullname) && self.by_fullname.len() >= MAX_MDNS_ENTRIES {
+            if let Some(evicted) = self.by_fullname.keys().next().cloned() {
+                self.by_fullname.remove(&evicted);
+            }
+        }
+        self.by_fullname
+            .insert(fullname.to_string(), device_id.to_string());
+    }
+
+    /// Drops `fullname`; returns the device id when no other service still maps to it.
+    fn release(&mut self, fullname: &str) -> Option<String> {
+        let device_id = self.by_fullname.remove(fullname)?;
+        if self.by_fullname.values().any(|id| id == &device_id) {
+            None
+        } else {
+            Some(device_id)
+        }
+    }
+}
+
 /// Peers discovered only via mDNS are not expired by TTL alone, as mDNS re-announces
 /// rarely; they rely on mDNS `ServiceRemoved` instead.
 pub fn is_stale(source: &str, last_seen_secs: u64, now_secs: u64, ttl_secs: u64) -> bool {
@@ -129,7 +166,7 @@ pub async fn start(
         std::thread::Builder::new()
             .name("qd-mdns".into())
             .spawn(move || {
-                let mut fullname_to_device: HashMap<String, String> = HashMap::new();
+                let mut mdns_index = FullnameIndex::new();
                 while let Ok(event) = browse.recv() {
                     match event {
                         ServiceEvent::ServiceResolved(info) => {
@@ -142,7 +179,7 @@ pub async fn start(
                                 continue;
                             }
                             let fullname = info.get_fullname().to_string();
-                            fullname_to_device.insert(fullname, device_id.clone());
+                            mdns_index.track(&fullname, &device_id);
 
                             let name = info
                                 .txt_properties
@@ -176,12 +213,10 @@ pub async fn start(
                             }
                         }
                         ServiceEvent::ServiceRemoved(_service_type, fullname) => {
-                            if let Some(device_id) = fullname_to_device.remove(&fullname) {
-                                if !fullname_to_device.values().any(|id| id == &device_id) {
-                                    trace!("mdns service removed for device {device_id}");
-                                    if tx.send(DiscoveryEvent::Lost { device_id }).is_err() {
-                                        return;
-                                    }
+                            if let Some(device_id) = mdns_index.release(&fullname) {
+                                trace!("mdns service removed for device {device_id}");
+                                if tx.send(DiscoveryEvent::Lost { device_id }).is_err() {
+                                    return;
                                 }
                             }
                         }
@@ -716,6 +751,28 @@ mod tests {
             .await
             .expect("find Device B");
         assert_eq!(peer.device_id, "bbbbbbbbbbbbbbbb");
+    }
+
+    #[test]
+    fn fullname_index_releases_only_the_last_service() {
+        let mut index = FullnameIndex::new();
+        index.track("_quicdrop._udp.local.one", "dev1");
+        index.track("_quicdrop._udp.local.two", "dev1");
+        assert_eq!(index.release("_quicdrop._udp.local.one"), None);
+        assert_eq!(
+            index.release("_quicdrop._udp.local.two").as_deref(),
+            Some("dev1")
+        );
+        assert_eq!(index.release("_quicdrop._udp.local.two"), None);
+    }
+
+    #[test]
+    fn fullname_index_stays_bounded() {
+        let mut index = FullnameIndex::new();
+        for n in 0..(MAX_MDNS_ENTRIES * 4) {
+            index.track(&format!("_quicdrop._udp.local.{n}"), "dev1");
+        }
+        assert_eq!(index.by_fullname.len(), MAX_MDNS_ENTRIES);
     }
 
     #[test]
