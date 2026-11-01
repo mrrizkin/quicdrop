@@ -19,7 +19,7 @@ pub mod util;
 
 pub use approval::{ApprovalRequest, ApprovalSender, Decision};
 pub use cancel::Cancel;
-pub use discovery::{Discovery, DiscoveryEvent, Peer, BEACON_INTERVAL, PEER_TTL};
+pub use discovery::Peer;
 pub use identity::Identity;
 pub use progress::{FileSink, FileVerdictSink};
 pub use proto::{

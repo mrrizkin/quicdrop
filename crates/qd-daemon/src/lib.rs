@@ -25,6 +25,9 @@ pub use api::router;
 pub const DEFAULT_API_PORT: u16 = 53319;
 pub const API_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// How often stale peers are swept; well under `PEER_TTL` so removal stays prompt.
+const SWEEP_INTERVAL: Duration = Duration::from_secs(1);
+
 pub(crate) fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -309,11 +312,11 @@ impl Inner {
             .unwrap_or_default()
     }
 
-    pub fn remember_peer(&self, peer: &Peer) {
+    pub(crate) fn remember_peer(&self, peer: &Peer) {
         self.remember_peer_at(peer, now_secs());
     }
 
-    pub fn remember_peer_at(&self, peer: &Peer, seen_at_secs: u64) {
+    pub(crate) fn remember_peer_at(&self, peer: &Peer, seen_at_secs: u64) {
         let mut view = PeerView::from_peer(peer, self.trust.is_trusted(&peer.device_id));
         view.last_seen = seen_at_secs;
         let mut broadcast_view = None;
@@ -339,7 +342,7 @@ impl Inner {
         }
     }
 
-    pub fn forget_peer(&self, device_id: &str) -> bool {
+    pub(crate) fn forget_peer(&self, device_id: &str) -> bool {
         let removed = {
             let Ok(mut peers) = self.peers.lock() else {
                 return false;
@@ -354,7 +357,7 @@ impl Inner {
         removed
     }
 
-    pub fn sweep_at(&self, now_secs: u64, ttl_secs: u64) -> Vec<String> {
+    pub(crate) fn sweep_at(&self, now_secs: u64, ttl_secs: u64) -> Vec<String> {
         let lost = {
             let Ok(mut peers) = self.peers.lock() else {
                 return Vec::new();
@@ -369,8 +372,8 @@ impl Inner {
         lost
     }
 
-    pub fn sweep(&self) -> Vec<String> {
-        self.sweep_at(now_secs(), qd_core::discovery::PEER_TTL.as_secs())
+    pub(crate) fn sweep(&self) -> Vec<String> {
+        self.sweep_at(now_secs(), discovery::PEER_TTL.as_secs())
     }
 
     fn start_transfer(
@@ -610,10 +613,10 @@ impl Daemon {
                         _ = shutdown.wait_for(|stop| *stop) => break,
                         event = events_rx.recv() => {
                             match event {
-                                Some(qd_core::discovery::DiscoveryEvent::Seen(peer)) => {
+                                Some(discovery::DiscoveryEvent::Seen(peer)) => {
                                     inner.remember_peer(&peer);
                                 }
-                                Some(qd_core::discovery::DiscoveryEvent::Lost { device_id }) => {
+                                Some(discovery::DiscoveryEvent::Lost { device_id }) => {
                                     inner.forget_peer(&device_id);
                                 }
                                 None => break,
@@ -629,7 +632,7 @@ impl Daemon {
             let inner = inner.clone();
             tokio::spawn(async move {
                 let mut shutdown = inner.shutdown.subscribe();
-                let mut ticker = tokio::time::interval(Duration::from_secs(1));
+                let mut ticker = tokio::time::interval(SWEEP_INTERVAL);
                 ticker.tick().await;
                 loop {
                     tokio::select! {
@@ -1156,14 +1159,14 @@ pub async fn spawn_send(
 }
 
 /// Sweep stale peers from the peer map. Returns the device IDs of removed peers.
-pub fn sweep_stale_peers(
+pub(crate) fn sweep_stale_peers(
     peers: &mut HashMap<String, PeerView>,
     now_secs: u64,
     ttl_secs: u64,
 ) -> Vec<String> {
     let mut lost = Vec::new();
     peers.retain(|id, peer| {
-        if qd_core::discovery::is_stale(&peer.source, peer.last_seen, now_secs, ttl_secs) {
+        if discovery::is_stale(&peer.source, peer.last_seen, now_secs, ttl_secs) {
             lost.push(id.clone());
             false
         } else {
