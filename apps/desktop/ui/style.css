@@ -382,10 +382,13 @@ select {
   display: flex;
   align-items: baseline;
   gap: 6px;
+  flex: 1 1 auto;
   min-width: 0;
+  overflow: hidden;
 }
 
 .peer-os {
+  flex: none;
   font-size: 10px;
   color: var(--text-3);
   letter-spacing: 0.02em;
@@ -395,6 +398,7 @@ select {
   display: flex;
   align-items: center;
   gap: 2px;
+  flex: none;
 }
 
 .peer-action {
@@ -457,7 +461,8 @@ select {
 }
 
 .peer-route {
-  flex: none;
+  flex: 0 1 auto;
+  min-width: 0;
   font-family: var(--mono);
   font-size: 10px;
   color: var(--text-3);
