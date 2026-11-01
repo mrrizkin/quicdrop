@@ -2942,7 +2942,7 @@ dependencies = [
 
 [[package]]
 name = "qd-core"
-version = "2026.44.14"
+version = "2026.44.15"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2964,7 +2964,7 @@ dependencies = [
 
 [[package]]
 name = "qd-daemon"
-version = "2026.44.14"
+version = "2026.44.15"
 dependencies = [
  "anyhow",
  "axum",
@@ -2982,7 +2982,7 @@ dependencies = [
 
 [[package]]
 name = "quicdrop-desktop"
-version = "2026.44.14"
+version = "2026.44.15"
 dependencies = [
  "qd-core",
  "qd-daemon",
