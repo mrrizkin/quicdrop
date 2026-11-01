@@ -284,6 +284,56 @@ async fn api_roundtrip() -> Result<()> {
         "error must mention mismatch: {err}"
     );
 
+    // --- probe endpoint ---------------------------------------------------
+    let probe_ok: Value = http
+        .post(format!("{base}/api/probe"))
+        .bearer_auth("test-token")
+        .json(&json!({
+            "addr": format!("127.0.0.1:{recv_port}"),
+            "device_id": captured_id,
+        }))
+        .send()
+        .await?
+        .json()
+        .await?;
+    assert_eq!(probe_ok["ok"], true);
+    assert!(probe_ok["peer"].is_object());
+    assert_eq!(probe_ok["peer"]["device_id"], captured_id);
+    assert!(probe_ok["error"].is_null());
+
+    let probe_mismatch: Value = http
+        .post(format!("{base}/api/probe"))
+        .bearer_auth("test-token")
+        .json(&json!({
+            "addr": format!("127.0.0.1:{recv_port}"),
+            "device_id": "0000000000000000",
+        }))
+        .send()
+        .await?
+        .json()
+        .await?;
+    assert_eq!(probe_mismatch["ok"], false);
+    assert!(probe_mismatch["peer"].is_null());
+    assert!(probe_mismatch["error"]
+        .as_str()
+        .unwrap()
+        .contains("device id mismatch"));
+
+    let probe_bad_addr: Value = http
+        .post(format!("{base}/api/probe"))
+        .bearer_auth("test-token")
+        .json(&json!({
+            "addr": "not-an-addr-and-never-resolves.invalid:59999",
+            "device_id": "anything",
+        }))
+        .send()
+        .await?
+        .json()
+        .await?;
+    assert_eq!(probe_bad_addr["ok"], false);
+    assert!(probe_bad_addr["peer"].is_null());
+    assert!(probe_bad_addr["error"].is_string());
+
     // --- shutdown ---------------------------------------------------------
     http.post(format!("{base}/api/shutdown"))
         .bearer_auth("test-token")
