@@ -5,8 +5,11 @@ const { listen } = window.__TAURI__.event;
 
 const state = {
   info: {},
-  peers: [],
+  serverPeers: [],
   manual: [],
+  savedRouteStates: {},
+  devices: [],
+  sections: { lan: [], mesh: [], saved: [] },
   transfers: [],
   approvals: [],
   trust: [],
@@ -195,11 +198,12 @@ async function refresh() {
       api("GET", "/api/approvals"),
     ]);
     state.info = status;
-    state.peers = mergePeers(peers);
     state.transfers = mergeTransfers(state.transfers, transfers);
     state.trust = trust;
     state.config = config;
     state.approvals = approvals;
+    seedSavedRouteStates(transfers);
+    mergePeers(peers);
     renderAll();
   } catch (error) {
     toast(`Cannot reach daemon: ${error}`);
@@ -207,7 +211,38 @@ async function refresh() {
 }
 
 function peerKey(peer) {
-  return peer.device_id || peer.addr;
+  return peer.key || peer.device_id || peer.addr;
+}
+
+function recomputeDevices() {
+  state.devices = buildDevices(state.serverPeers, state.manual, state.savedRouteStates);
+  applyTrust();
+  state.sections = assignRouteSections(state.devices);
+}
+
+function updateSavedRouteLiveState(addr, routeState) {
+  if (!addr) return;
+  if (state.savedRouteStates[addr] !== routeState) {
+    state.savedRouteStates[addr] = routeState;
+    recomputeDevices();
+    schedulePeers();
+  }
+}
+
+function seedSavedRouteStates(transfers) {
+  if (!Array.isArray(transfers)) return;
+  for (const saved of state.manual) {
+    if (state.savedRouteStates[saved.addr]) continue;
+    const recent = transfers.find(
+      (t) =>
+        t.direction === "out" &&
+        t.peer_id === saved.addr &&
+        (t.status === "done" || t.status === "failed"),
+    );
+    if (recent) {
+      state.savedRouteStates[saved.addr] = recent.status === "done" ? "live" : "lost";
+    }
+  }
 }
 
 function manualPeer(addr, label = "") {
@@ -248,6 +283,7 @@ function loadManualPeers() {
     })
     .filter(Boolean);
   saveManualPrefs();
+  recomputeDevices();
 }
 
 function saveManualPrefs() {
@@ -255,55 +291,61 @@ function saveManualPrefs() {
   savePrefs();
 }
 
-/* Discovered peers replace manual entries with the same address. */
+/* Discovered peers and saved addresses coexist as independent routes. */
 function mergePeers(serverPeers) {
-  const known = new Map(serverPeers.map((peer) => [peer.addr, peer]));
-  const superseded = state.manual.find((peer) => peer.addr === state.selectedPeer);
-  const replacement = superseded && known.get(superseded.addr);
-  if (replacement) state.selectedPeer = peerKey(replacement);
-  const manual = state.manual.filter((peer) => !known.has(peer.addr));
-  return [...serverPeers, ...manual].sort((a, b) => a.name.localeCompare(b.name));
+  state.serverPeers = Array.isArray(serverPeers) ? serverPeers : [];
+  recomputeDevices();
+  return flattenSections(state.sections);
 }
 
 function addManualPeer(rawAddress, label, port) {
   const addr = withDefaultPort(String(rawAddress || "").trim(), port || state.info.quic_port || 53320);
   if (!addr) return "";
-  if (state.manual.some((peer) => peer.addr === addr) || state.peers.some((peer) => peer.addr === addr)) {
+  if (state.manual.some((peer) => peer.addr === addr)) {
     toast(`${addr} is already in the list.`);
     return "";
   }
   const peer = manualPeer(addr, label);
   state.manual.push(peer);
-  state.peers.push(peer);
-  state.peers.sort((a, b) => a.name.localeCompare(b.name));
+  recomputeDevices();
   saveManualPrefs();
   return addr;
 }
 
 function removeManualPeer(addr) {
   state.manual = state.manual.filter((peer) => peer.addr !== addr);
-  state.peers = state.peers.filter((peer) => peer.addr !== addr);
-  if (state.selectedPeer === addr) state.selectedPeer = null;
+  delete state.savedRouteStates[addr];
+  const savedKey = `saved:${addr}`;
+  if (state.selectedPeer === savedKey || state.selectedPeer === addr) {
+    state.selectedPeer = null;
+  }
+  recomputeDevices();
   saveManualPrefs();
   renderPeers();
 }
 
 function upsertPeer(peer) {
-  state.peers = state.peers.filter((p) => !(p.manual && p.addr === peer.addr));
-  const index = state.peers.findIndex((p) => peerKey(p) === peerKey(peer));
-  if (index >= 0) state.peers[index] = peer;
-  else state.peers.push(peer);
-  state.peers.sort((a, b) => a.name.localeCompare(b.name));
+  const index = state.serverPeers.findIndex(
+    (p) => (p.device_id && p.device_id === peer.device_id) || p.addr === peer.addr,
+  );
+  if (index >= 0) state.serverPeers[index] = peer;
+  else state.serverPeers.push(peer);
+  recomputeDevices();
 }
 
 function removeDiscoveredPeer(deviceId) {
-  const lost = state.peers.find((p) => !p.manual && p.device_id === deviceId);
+  const lost = state.serverPeers.find((p) => p.device_id === deviceId);
   if (!lost) return;
-  if (state.selectedPeer === deviceId || state.selectedPeer === lost.addr || state.selectedPeer === peerKey(lost)) {
+  const lanKey = `lan:${deviceId}`;
+  if (
+    state.selectedPeer === lanKey ||
+    state.selectedPeer === deviceId ||
+    state.selectedPeer === lost.addr
+  ) {
     state.selectedPeer = null;
   }
-  const remainingServer = state.peers.filter((p) => !p.manual && p.device_id !== deviceId);
-  state.peers = mergePeers(remainingServer);
+  state.serverPeers = state.serverPeers.filter((p) => p.device_id !== deviceId);
+  recomputeDevices();
   schedulePeers();
 }
 
@@ -415,7 +457,9 @@ function upsertTransfer(transfer) {
 
 function applyTrust() {
   const trusted = new Set(state.trust.map((p) => p.device_id));
-  state.peers.forEach((p) => (p.trusted = trusted.has(p.device_id)));
+  state.devices.forEach((d) => {
+    d.trusted = Boolean(d.device_id && trusted.has(d.device_id));
+  });
 }
 
 
@@ -442,19 +486,29 @@ function renderDevice() {
   }
 }
 
+const SECTION_DEFS = [
+  { id: "lan", label: "LAN" },
+  { id: "mesh", label: "Mesh" },
+  { id: "saved", label: "Saved addresses" },
+];
+
 function renderPeers() {
-  $("peer-count").textContent = state.peers.length;
+  const totalCount = flattenSections(state.sections).length;
+  $("peer-count").textContent = totalCount;
   const list = $("peer-list");
   $("peers-hint").textContent =
-    state.peers.length === 0
+    totalCount === 0
       ? "Looking for devices on your network…"
       : "Pick a device, then send files or drop them here.";
 
+  if (state.selectedPeer && !peerByKey(state.selectedPeer)) {
+    state.selectedPeer = null;
+  }
   const selected = Boolean(state.selectedPeer);
   $("btn-send").disabled = !selected;
   $("btn-send-folder").disabled = !selected;
 
-  if (state.peers.length === 0) {
+  if (totalCount === 0) {
     list.innerHTML = `
       <li class="peer-empty">
         <div class="radar"></div>
@@ -463,49 +517,72 @@ function renderPeers() {
     return;
   }
 
-  list.innerHTML = state.peers
-    .map((peer) => {
-      const key = peerKey(peer);
-      const isSelected = state.selectedPeer === key;
-      const idLabel = peer.manual ? "address" : shortId(peer.device_id);
-      const title = peer.manual
-        ? `Send to ${peer.label ? `${peer.label} (${peer.addr})` : peer.addr}`
-        : `${peer.name} · id ${shortId(peer.device_id)}`;
-      const platform = peer.manual
-        ? ""
-        : `<span class="peer-os" title="Platform">${esc(peer.platform || "unknown")}</span>`;
-      return `
-        <li class="peer ${isSelected ? "selected" : ""}" data-key="${esc(key)}"
+  const html = [];
+  for (const def of SECTION_DEFS) {
+    const items = state.sections[def.id] || [];
+    if (items.length === 0) continue;
+
+    html.push(`
+      <li class="peer-section-head" role="separator" aria-label="${esc(def.label)}">
+        <span>${esc(def.label)}</span>
+        <span class="count">${items.length}</span>
+      </li>`);
+
+    for (const item of items) {
+      const isSelected = state.selectedPeer === item.key;
+      const title = item.manual
+        ? (item.label ? `Send to ${item.label} (${item.addr})` : `Send to ${item.addr}`)
+        : (item.device_id ? `${item.name} · via ${item.addr} · id ${shortId(item.device_id)}` : `${item.name} · via ${item.addr}`);
+      const platform = item.platform
+        ? `<span class="peer-os" title="Platform">${esc(item.platform)}</span>`
+        : "";
+      const idElem = item.device_id
+        ? `<span class="peer-id" title="device id">${shortId(item.device_id)}</span>`
+        : "";
+
+      html.push(`
+        <li class="peer ${isSelected ? "selected" : ""}" data-key="${esc(item.key)}"
+            tabindex="0" role="button" aria-selected="${isSelected ? "true" : "false"}"
             title="${esc(title)}">
           <span class="peer-check">✓</span>
-          <div class="avatar" style="--hue:${hueFor(peer.device_id || peer.addr)}">${initial(peer.name)}</div>
+          <div class="avatar" style="--hue:${hueFor(item.device_id || item.addr)}">${initial(item.name)}</div>
           <div class="peer-lines">
             <div class="peer-row">
-              <span class="peer-label">${esc(peer.name)}</span>
+              <span class="peer-label">${esc(item.name)}</span>
               <span class="peer-tags">
-                ${peer.trusted ? `<span title="Trusted">${icon("shield")}</span>` : ""}
+                ${item.trusted ? `<span title="Trusted">${icon("shield")}</span>` : ""}
               </span>
             </div>
+            <div class="peer-route" title="via ${esc(item.addr)}">via ${esc(item.addr)}</div>
             <div class="peer-row">
               <span class="peer-meta-left">
-                <span class="peer-id" title="${peer.manual ? "address" : "device id"}">${idLabel}</span>
+                ${idElem}
                 ${platform}
               </span>
               <span class="peer-actions">
-                ${peer.manual ? `<button class="icon-btn peer-action" data-remove="${esc(peer.addr)}" title="Remove">${icon("trash")}</button>` : ""}
-                <button class="icon-btn peer-action" data-send-files="${esc(key)}" title="Send files">${icon("upload")}</button>
-                <button class="icon-btn peer-action" data-send-folders="${esc(key)}" title="Send folders">${icon("folder")}</button>
+                ${item.manual ? `<button class="icon-btn peer-action" data-remove="${esc(item.addr)}" title="Remove">${icon("trash")}</button>` : ""}
+                <button class="icon-btn peer-action" data-send-files="${esc(item.key)}" title="Send files">${icon("upload")}</button>
+                <button class="icon-btn peer-action" data-send-folders="${esc(item.key)}" title="Send folders">${icon("folder")}</button>
               </span>
             </div>
           </div>
-        </li>`;
-    })
-    .join("");
+        </li>`);
+    }
+  }
+
+  list.innerHTML = html.join("");
 
   list.querySelectorAll(".peer").forEach((row) => {
     row.addEventListener("click", (event) => {
-      if (event.target.closest("[data-send-files]") || event.target.closest("[data-send-folders]")) return;
+      if (event.target.closest("[data-send-files]") || event.target.closest("[data-send-folders]") || event.target.closest("[data-remove]")) return;
       selectPeer(row.dataset.key);
+    });
+    row.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        if (event.target !== row) return;
+        event.preventDefault();
+        selectPeer(row.dataset.key);
+      }
     });
   });
   list.querySelectorAll("[data-remove]").forEach((button) => {
@@ -536,7 +613,7 @@ function selectPeer(key) {
 }
 
 function peerByKey(key) {
-  return state.peers.find((p) => peerKey(p) === key) || null;
+  return findRouteRow(state.sections, key);
 }
 
 function renderTrust() {
@@ -612,6 +689,7 @@ function schedulePeers() {
   peersRenderQueued = true;
   const run = () => {
     peersRenderQueued = false;
+    recomputeDevices();
     renderPeers();
   };
   if (typeof requestAnimationFrame === "function") requestAnimationFrame(run);
@@ -1086,14 +1164,18 @@ async function sendToTarget(to, name, paths, message) {
     });
     toast(message || (name ? `Sending to ${name}…` : `Sending to ${to}…`));
   } catch (error) {
+    if (state.manual.some((p) => p.addr === to)) {
+      updateSavedRouteLiveState(to, "lost");
+    }
     toast(`Send failed: ${error}`);
   }
 }
 
 async function sendPaths(peer, paths, message) {
   // Device id is unique and pins the certificate; a name can repeat.
+  const target = peer.manual ? peer.addr : (peer.device_id || peer.addr);
   await sendToTarget(
-    peer.device_id || peer.addr,
+    target,
     peer.name,
     paths,
     message ||
@@ -1324,7 +1406,7 @@ $("add-form").addEventListener("submit", (event) => {
     return;
   }
   closeAddDevice();
-  state.selectedPeer = addr;
+  state.selectedPeer = `saved:${addr}`;
   renderPeers();
   toast(`${addr} added. Choose files or a folder.`);
 });
@@ -1364,7 +1446,7 @@ async function handleEvent(payload) {
         device_id: payload.device_id,
         short_id: String(payload.device_id || "").slice(0, 8),
       };
-      state.peers = mergePeers(payload.peers || []);
+      mergePeers(payload.peers || []);
       state.approvals = payload.approvals || [];
       (payload.active || []).forEach(upsertTransfer);
       renderAll();
@@ -1381,6 +1463,13 @@ async function handleEvent(payload) {
       upsertTransfer(payload.transfer);
       markTransferDirty(payload.transfer.id, true);
       const t = payload.transfer;
+      if (t.direction === "out" && t.peer_id && state.manual.some((p) => p.addr === t.peer_id)) {
+        if (t.status === "done") {
+          updateSavedRouteLiveState(t.peer_id, "live");
+        } else if (t.status === "failed") {
+          updateSavedRouteLiveState(t.peer_id, "lost");
+        }
+      }
       if (prefs.openAfter && t.direction === "in" && t.status === "done" && before?.status !== "done") {
         invoke("open_path", { path: state.config.out_dir }).catch(() => {});
       }

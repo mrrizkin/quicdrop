@@ -307,6 +307,28 @@ select {
   flex: 0 1 auto;
 }
 
+.peer-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 6px 3px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-3);
+  user-select: none;
+}
+
+.peer-section-head:first-child {
+  padding-top: 2px;
+}
+
+.peer-section-head .count {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-3);
+}
+
 .peer {
   display: flex;
   align-items: center;
@@ -327,7 +349,7 @@ select {
 .peer-lines {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1.5px;
   flex: 1;
   min-width: 0;
 }
@@ -360,10 +382,13 @@ select {
   display: flex;
   align-items: baseline;
   gap: 6px;
+  flex: 1 1 auto;
   min-width: 0;
+  overflow: hidden;
 }
 
 .peer-os {
+  flex: none;
   font-size: 10px;
   color: var(--text-3);
   letter-spacing: 0.02em;
@@ -373,6 +398,7 @@ select {
   display: flex;
   align-items: center;
   gap: 2px;
+  flex: none;
 }
 
 .peer-action {
@@ -432,6 +458,18 @@ select {
   font-size: 10px;
   color: var(--text-3);
   letter-spacing: 0.02em;
+}
+
+.peer-route {
+  width: 100%;
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1.25;
+  color: var(--text-3);
+  letter-spacing: 0.02em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .peer.selected .peer-label {
@@ -1354,7 +1392,15 @@ select.input {
 }
 
 [data-density="compact"] .peer {
-  padding-block: 4px;
+  padding-block: 3px;
+}
+
+[data-density="compact"] .peer-lines {
+  gap: 1px;
+}
+
+[data-density="compact"] .peer-section-head {
+  padding-block: 4px 2px;
 }
 
 [data-density="compact"] .transfer {
