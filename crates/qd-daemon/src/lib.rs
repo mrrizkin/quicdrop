@@ -25,6 +25,9 @@ pub use api::router;
 pub const DEFAULT_API_PORT: u16 = 53319;
 pub const API_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// How often stale peers are swept; well under `PEER_TTL` so removal stays prompt.
+const SWEEP_INTERVAL: Duration = Duration::from_secs(1);
+
 pub(crate) fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -169,6 +172,9 @@ pub enum DaemonEvent {
     Peer {
         peer: PeerView,
     },
+    PeerLost {
+        device_id: String,
+    },
     Session {
         transfer: TransferView,
     },
@@ -306,29 +312,68 @@ impl Inner {
             .unwrap_or_default()
     }
 
-    fn remember_peer(&self, peer: &Peer) {
-        let view = PeerView::from_peer(peer, self.trust.is_trusted(&peer.device_id));
-        let changed = {
-            let Ok(mut peers) = self.peers.lock() else {
-                return;
-            };
-            match peers.get(&peer.device_id) {
-                Some(existing)
-                    if existing.addr == view.addr
-                        && existing.name == view.name
-                        && existing.trusted == view.trusted =>
-                {
-                    false
+    pub(crate) fn remember_peer(&self, peer: &Peer) {
+        self.remember_peer_at(peer, now_secs());
+    }
+
+    pub(crate) fn remember_peer_at(&self, peer: &Peer, seen_at_secs: u64) {
+        let mut view = PeerView::from_peer(peer, self.trust.is_trusted(&peer.device_id));
+        view.last_seen = seen_at_secs;
+        let mut broadcast_view = None;
+        if let Ok(mut peers) = self.peers.lock() {
+            if let Some(existing) = peers.get_mut(&peer.device_id) {
+                existing.last_seen = seen_at_secs;
+                let changed = existing.addr != view.addr
+                    || existing.name != view.name
+                    || existing.trusted != view.trusted;
+                if changed {
+                    *existing = view.clone();
+                    broadcast_view = Some(view);
+                } else if existing.source == "mdns" && view.source == "beacon" {
+                    existing.source = view.source;
                 }
-                _ => {
-                    peers.insert(peer.device_id.clone(), view.clone());
-                    true
-                }
+            } else {
+                peers.insert(peer.device_id.clone(), view.clone());
+                broadcast_view = Some(view);
             }
-        };
-        if changed {
+        }
+        if let Some(view) = broadcast_view {
             self.broadcast(DaemonEvent::Peer { peer: view });
         }
+    }
+
+    pub(crate) fn forget_peer(&self, device_id: &str) -> bool {
+        let removed = {
+            let Ok(mut peers) = self.peers.lock() else {
+                return false;
+            };
+            peers.remove(device_id).is_some()
+        };
+        if removed {
+            self.broadcast(DaemonEvent::PeerLost {
+                device_id: device_id.to_string(),
+            });
+        }
+        removed
+    }
+
+    pub(crate) fn sweep_at(&self, now_secs: u64, ttl_secs: u64) -> Vec<String> {
+        let lost = {
+            let Ok(mut peers) = self.peers.lock() else {
+                return Vec::new();
+            };
+            sweep_stale_peers(&mut peers, now_secs, ttl_secs)
+        };
+        for id in &lost {
+            self.broadcast(DaemonEvent::PeerLost {
+                device_id: id.clone(),
+            });
+        }
+        lost
+    }
+
+    pub(crate) fn sweep(&self) -> Vec<String> {
+        self.sweep_at(now_secs(), discovery::PEER_TTL.as_secs())
     }
 
     fn start_transfer(
@@ -555,15 +600,47 @@ impl Daemon {
             cfg.quic_port
         );
 
-        let mut peers_rx = std::mem::replace(
-            &mut running.discovery.peers,
+        let mut events_rx = std::mem::replace(
+            &mut running.discovery.events,
             tokio::sync::mpsc::unbounded_channel().1,
         );
         {
             let inner = inner.clone();
             tokio::spawn(async move {
-                while let Some(peer) = peers_rx.recv().await {
-                    inner.remember_peer(&peer);
+                let mut shutdown = inner.shutdown.subscribe();
+                loop {
+                    tokio::select! {
+                        _ = shutdown.wait_for(|stop| *stop) => break,
+                        event = events_rx.recv() => {
+                            match event {
+                                Some(discovery::DiscoveryEvent::Seen(peer)) => {
+                                    inner.remember_peer(&peer);
+                                }
+                                Some(discovery::DiscoveryEvent::Lost { device_id }) => {
+                                    inner.forget_peer(&device_id);
+                                }
+                                None => break,
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        // Periodic sweep task removes peers not seen within PEER_TTL.
+        {
+            let inner = inner.clone();
+            tokio::spawn(async move {
+                let mut shutdown = inner.shutdown.subscribe();
+                let mut ticker = tokio::time::interval(SWEEP_INTERVAL);
+                ticker.tick().await;
+                loop {
+                    tokio::select! {
+                        _ = shutdown.wait_for(|stop| *stop) => break,
+                        _ = ticker.tick() => {
+                            inner.sweep();
+                        }
+                    }
                 }
             });
         }
@@ -1079,4 +1156,231 @@ pub async fn spawn_send(
     });
 
     id
+}
+
+/// Sweep stale peers from the peer map. Returns the device IDs of removed peers.
+pub(crate) fn sweep_stale_peers(
+    peers: &mut HashMap<String, PeerView>,
+    now_secs: u64,
+    ttl_secs: u64,
+) -> Vec<String> {
+    let mut lost = Vec::new();
+    peers.retain(|id, peer| {
+        if discovery::is_stale(&peer.source, peer.last_seen, now_secs, ttl_secs) {
+            lost.push(id.clone());
+            false
+        } else {
+            true
+        }
+    });
+    lost
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    fn test_peer(id: &str, name: &str, source: &'static str) -> Peer {
+        Peer {
+            device_id: id.to_string(),
+            name: name.to_string(),
+            platform: "linux".to_string(),
+            quic_port: 53320,
+            addr: "10.0.0.2:53320".parse().expect("addr"),
+            source,
+            last_seen: Instant::now(),
+        }
+    }
+
+    fn test_inner() -> (Arc<Inner>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (events, _) = broadcast::channel(512);
+        let (shutdown, _) = watch::channel(false);
+        let identity =
+            Arc::new(Identity::load_or_create_in(dir.path().join("cfg"), None).expect("identity"));
+        let trust = TrustStore::at(dir.path().join("trusted.json"));
+        let inner = Arc::new(Inner {
+            identity,
+            token: "test".into(),
+            listen: "127.0.0.1:0".parse().expect("addr"),
+            quic_port: 53320,
+            discovery_port: 53321,
+            version: API_VERSION.to_string(),
+            started_at: 1000,
+            local_addrs: vec![],
+            runtime: Arc::new(RuntimeSettings::new(dir.path().join("out"), Policy::Ask)),
+            trust,
+            peers: Mutex::new(HashMap::new()),
+            transfers: Mutex::new(Vec::new()),
+            inbound: Mutex::new(HashMap::new()),
+            cancels: Mutex::new(HashMap::new()),
+            conns: Mutex::new(HashMap::new()),
+            approvals: Mutex::new(HashMap::new()),
+            events,
+            next_id: AtomicU64::new(1),
+            shutdown,
+        });
+        (inner, dir)
+    }
+
+    #[test]
+    fn pure_sweep_removes_expired_beacon_peer() {
+        let mut peers = HashMap::new();
+        peers.insert(
+            "dev1".into(),
+            PeerView {
+                device_id: "dev1".into(),
+                name: "Peer 1".into(),
+                platform: "linux".into(),
+                addr: "10.0.0.1:53320".into(),
+                source: "beacon".into(),
+                trusted: false,
+                last_seen: 100,
+            },
+        );
+        let lost = sweep_stale_peers(&mut peers, 113, 12);
+        assert_eq!(lost, vec!["dev1".to_string()]);
+        assert!(peers.is_empty());
+    }
+
+    #[test]
+    fn pure_sweep_retains_fresh_beacon_peer() {
+        let mut peers = HashMap::new();
+        peers.insert(
+            "dev1".into(),
+            PeerView {
+                device_id: "dev1".into(),
+                name: "Peer 1".into(),
+                platform: "linux".into(),
+                addr: "10.0.0.1:53320".into(),
+                source: "beacon".into(),
+                trusted: false,
+                last_seen: 105,
+            },
+        );
+        let lost = sweep_stale_peers(&mut peers, 113, 12);
+        assert!(lost.is_empty());
+        assert_eq!(peers.len(), 1);
+    }
+
+    #[test]
+    fn pure_sweep_ignores_mdns_only_peer() {
+        let mut peers = HashMap::new();
+        peers.insert(
+            "dev1".into(),
+            PeerView {
+                device_id: "dev1".into(),
+                name: "Peer 1".into(),
+                platform: "linux".into(),
+                addr: "10.0.0.1:53320".into(),
+                source: "mdns".into(),
+                trusted: false,
+                last_seen: 100,
+            },
+        );
+        let lost = sweep_stale_peers(&mut peers, 1000, 12);
+        assert!(lost.is_empty());
+        assert_eq!(peers.len(), 1);
+    }
+
+    #[test]
+    fn refreshed_peer_stays() {
+        let (inner, _dir) = test_inner();
+        let peer = test_peer("dev1", "Peer 1", "beacon");
+
+        inner.remember_peer_at(&peer, 100);
+        assert_eq!(inner.peers().len(), 1);
+
+        // Sweep before TTL -> stays
+        let lost = inner.sweep_at(108, 12);
+        assert!(lost.is_empty());
+        assert_eq!(inner.peers().len(), 1);
+
+        // Refreshed sighting at t=108
+        inner.remember_peer_at(&peer, 108);
+
+        // Sweep at t=115 (15s from initial, but only 7s from refresh) -> stays
+        let lost = inner.sweep_at(115, 12);
+        assert!(lost.is_empty());
+        assert_eq!(inner.peers().len(), 1);
+        assert_eq!(inner.counts().peers, 1);
+    }
+
+    #[tokio::test]
+    async fn stale_peer_removed_and_emits_peer_lost() {
+        let (inner, _dir) = test_inner();
+        let mut rx = inner.subscribe();
+        let peer = test_peer("dev1", "Peer 1", "beacon");
+
+        inner.remember_peer_at(&peer, 100);
+        // First sighting emits Peer event
+        let event = rx.recv().await.expect("peer event");
+        assert!(matches!(event, DaemonEvent::Peer { .. }));
+
+        // Sweep after TTL
+        let lost = inner.sweep_at(113, 12);
+        assert_eq!(lost, vec!["dev1".to_string()]);
+        assert_eq!(inner.peers().len(), 0);
+        assert_eq!(inner.counts().peers, 0);
+
+        // Broadcast emits PeerLost event
+        let event = rx.recv().await.expect("peer lost event");
+        match event {
+            DaemonEvent::PeerLost { device_id } => assert_eq!(device_id, "dev1"),
+            other => panic!("expected PeerLost event, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn lost_event_removes_peer_and_emits_peer_lost() {
+        let (inner, _dir) = test_inner();
+        let mut rx = inner.subscribe();
+        let peer = test_peer("dev1", "Peer 1", "mdns");
+
+        inner.remember_peer_at(&peer, 100);
+        let _ = rx.recv().await.expect("peer event");
+        assert_eq!(inner.peers().len(), 1);
+
+        // forget_peer (called by DiscoveryEvent::Lost) promptly removes it
+        let removed = inner.forget_peer("dev1");
+        assert!(removed);
+        assert_eq!(inner.peers().len(), 0);
+        assert_eq!(inner.counts().peers, 0);
+
+        let event = rx.recv().await.expect("peer lost event");
+        match event {
+            DaemonEvent::PeerLost { device_id } => assert_eq!(device_id, "dev1"),
+            other => panic!("expected PeerLost event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mdns_peer_not_expired_by_ttl() {
+        let (inner, _dir) = test_inner();
+        let peer = test_peer("dev1", "Peer 1", "mdns");
+
+        inner.remember_peer_at(&peer, 100);
+        let lost = inner.sweep_at(1000, 12);
+        assert!(lost.is_empty());
+        assert_eq!(inner.peers().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn sighting_refreshes_last_seen_without_duplicate_broadcast() {
+        let (inner, _dir) = test_inner();
+        let mut rx = inner.subscribe();
+        let peer = test_peer("dev1", "Peer 1", "beacon");
+
+        inner.remember_peer_at(&peer, 100);
+        let _ = rx.recv().await.expect("peer event");
+        assert_eq!(inner.peers()[0].last_seen, 100);
+
+        // Re-sighting with same address/name/trusted
+        inner.remember_peer_at(&peer, 105);
+        assert_eq!(inner.peers()[0].last_seen, 105);
+
+        // No new event broadcast
+        assert!(rx.try_recv().is_err());
+    }
 }

@@ -294,13 +294,18 @@ pub async fn start(opts: ServerOpts) -> Result<RunningServer> {
 
 pub async fn serve(mut server: RunningServer, opts: ServerOpts) -> Result<()> {
     {
-        let mut peers = std::mem::replace(
-            &mut server.discovery.peers,
+        let mut events = std::mem::replace(
+            &mut server.discovery.events,
             tokio::sync::mpsc::unbounded_channel().1,
         );
         tokio::spawn(async move {
-            while let Some(peer) = peers.recv().await {
-                debug!("peer seen: {peer}");
+            while let Some(event) = events.recv().await {
+                match event {
+                    discovery::DiscoveryEvent::Seen(peer) => debug!("peer seen: {peer}"),
+                    discovery::DiscoveryEvent::Lost { device_id } => {
+                        debug!("peer lost: {device_id}")
+                    }
+                }
             }
         });
     }
