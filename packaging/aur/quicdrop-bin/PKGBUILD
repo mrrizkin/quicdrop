@@ -2,7 +2,7 @@
 
 pkgname=quicdrop-bin
 _pkgname=quicdrop
-pkgver=2026.44.14
+pkgver=2026.44.15
 pkgrel=1
 pkgdesc="Peer-to-peer file transfer over QUIC, prebuilt"
 arch=('x86_64')
@@ -19,8 +19,8 @@ source=(
   "$_pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz"
 )
 sha256sums=(
-  'ee59701ed84a1d0eef73a19a30afa05d3f8fbac086ae701f0f4da0de3a43b40a'
-  '5c5f77b00a5d5064bb97db2b4391ea86f2dc6ea1568d25cd649a0a2c4b80ebcb'
+  'd6bf90bf181c18a8188a0691355b02412e63b50f8ead2eb08e5b95dd1fb38c94'
+  'aa1566ffad86ca53cd6f0173ea485c2546d67bd4f9ff68c5e2b957936c35a85c'
 )
 
 prepare() {
