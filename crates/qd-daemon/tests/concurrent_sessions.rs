@@ -214,6 +214,12 @@ async fn concurrent_inbound_sessions_stay_separate() -> Result<()> {
             transfer["transferred"], transfer["total_bytes"],
             "progress leaked across sessions: {transfer}"
         );
+        let duration_ms = transfer["duration_ms"].as_u64().expect("duration_ms");
+        let avg_bps = transfer["avg_bps"].as_u64().expect("avg_bps");
+        let total_bytes = transfer["total_bytes"].as_u64().expect("total_bytes");
+        assert!(duration_ms >= 1);
+        let expected_bps = total_bytes * 1000 / duration_ms;
+        assert_eq!(avg_bps, expected_bps);
     }
     let total_for = |name: &str| {
         inbound

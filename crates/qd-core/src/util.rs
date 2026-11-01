@@ -21,6 +21,24 @@ pub fn human_rate(bytes_per_sec: f64) -> String {
     format!("{}/s", human_bytes(bytes_per_sec as u64))
 }
 
+/// Compute transfer duration in milliseconds and average rate in bytes per second.
+///
+/// Clamps duration to >= 1 ms when `bytes > 0` to prevent division by zero.
+/// Returns `None` for rate when `bytes == 0`.
+pub fn calc_transfer_speed(bytes: u64, duration: std::time::Duration) -> (u64, Option<u64>) {
+    let ms = if bytes > 0 {
+        (duration.as_millis() as u64).max(1)
+    } else {
+        duration.as_millis() as u64
+    };
+    let avg = if bytes == 0 {
+        None
+    } else {
+        Some(((bytes as u128 * 1000) / (ms as u128)) as u64)
+    };
+    (ms, avg)
+}
+
 /// Default receive directory: `~/Downloads/QuicDrop`.
 pub fn default_download_dir() -> PathBuf {
     dirs::download_dir()
@@ -242,5 +260,39 @@ mod tests {
         assert_eq!(human_age(now - 120), "2m ago");
         assert_eq!(human_age(now - 7200), "2h ago");
         assert_eq!(human_age(now - 172_800), "2d ago");
+    }
+
+    #[test]
+    fn transfer_speed_calculation() {
+        use std::time::Duration;
+
+        // Normal transfer
+        let (ms, avg) = calc_transfer_speed(24_400_000, Duration::from_millis(3200));
+        assert_eq!(ms, 3200);
+        assert_eq!(avg, Some(24_400_000 * 1000 / 3200));
+
+        // 0 bytes with non-zero duration
+        let (ms, avg) = calc_transfer_speed(0, Duration::from_millis(1500));
+        assert_eq!(ms, 1500);
+        assert_eq!(avg, None);
+
+        // 0 bytes with 0 duration
+        let (ms, avg) = calc_transfer_speed(0, Duration::ZERO);
+        assert_eq!(ms, 0);
+        assert_eq!(avg, None);
+
+        // Very short duration (0 duration, sub-millisecond) with bytes > 0 clamped to >= 1ms
+        let (ms, avg) = calc_transfer_speed(500, Duration::ZERO);
+        assert_eq!(ms, 1);
+        assert_eq!(avg, Some(500_000));
+
+        let (ms, avg) = calc_transfer_speed(500, Duration::from_micros(200));
+        assert_eq!(ms, 1);
+        assert_eq!(avg, Some(500_000));
+
+        // Large transfer does not overflow
+        let (ms, avg) = calc_transfer_speed(100 * 1024 * 1024 * 1024, Duration::from_secs(10));
+        assert_eq!(ms, 10_000);
+        assert_eq!(avg, Some(10 * 1024 * 1024 * 1024));
     }
 }

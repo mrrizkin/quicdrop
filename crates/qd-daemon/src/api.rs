@@ -302,7 +302,7 @@ async fn cancel_transfer(
     }
     if let Some(conn) = inner.conns.lock().ok().and_then(|m| m.get(&id).cloned()) {
         conn.close(0u32.into(), b"cancelled");
-        inner.finish_transfer(&id, TransferStatus::Cancelled, None);
+        inner.finish_transfer(&id, TransferStatus::Cancelled, None, None);
         return Ok(Json(json!({ "ok": true })));
     }
     Err(not_found(format!("no active transfer {id}")))
