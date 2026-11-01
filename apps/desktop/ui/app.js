@@ -18,15 +18,6 @@ const state = {
   selectedPeer: null,
 };
 
-Object.defineProperty(state, "peers", {
-  get() {
-    return flattenSections(this.sections);
-  },
-  set(_) {},
-  configurable: true,
-  enumerable: true,
-});
-
 const $ = (id) => document.getElementById(id);
 
 const icon = (name) => `<svg class="i"><use href="#i-${name}"/></svg>`;
@@ -304,7 +295,7 @@ function saveManualPrefs() {
 function mergePeers(serverPeers) {
   state.serverPeers = Array.isArray(serverPeers) ? serverPeers : [];
   recomputeDevices();
-  return state.peers;
+  return flattenSections(state.sections);
 }
 
 function addManualPeer(rawAddress, label, port) {
