@@ -225,3 +225,58 @@ async fn resume_works_for_nested_paths() -> Result<()> {
     assert_eq!(count, 1);
     Ok(())
 }
+
+#[tokio::test]
+async fn send_captures_peer_identity_and_detects_mismatch() -> Result<()> {
+    let h = Harness::new(Policy::Auto).await?;
+    let file = h.root.path().join("test.txt");
+    std::fs::write(&file, b"hello identity")?;
+
+    // 1. Normal send without expected device_id captures peer
+    let summary = h.send_paths(vec![file.clone()]).await?;
+    assert!(
+        summary.peer.is_some(),
+        "captured peer info must be populated"
+    );
+    let peer = summary.peer.unwrap();
+    assert!(!peer.device_id.is_empty());
+    assert!(!peer.name.is_empty());
+    assert!(!peer.platform.is_empty());
+
+    // 2. Send with correct pinned device_id succeeds
+    let opts = SendOpts {
+        addr: h.addr,
+        device_id: Some(peer.device_id.clone()),
+        files: vec![file.clone()],
+        ..SendOpts::default()
+    };
+    let summary2 = timeout(Duration::from_secs(20), client::send(opts)).await??;
+    assert_eq!(summary2.ok, 1);
+    assert_eq!(summary2.peer.unwrap().device_id, peer.device_id);
+
+    // 3. Send with mismatched device_id fails with distinct mismatch error
+    let bad_opts = SendOpts {
+        addr: h.addr,
+        device_id: Some("ffffffffffffffff".to_string()),
+        files: vec![file],
+        ..SendOpts::default()
+    };
+    let err = match timeout(Duration::from_secs(20), client::send(bad_opts)).await? {
+        Ok(_) => panic!("should fail with mismatch"),
+        Err(e) => format!("{e:#}"),
+    };
+    assert!(
+        err.contains("device id mismatch"),
+        "error must contain 'device id mismatch', got: {err}"
+    );
+    assert!(
+        err.contains("expected ffffffffffffffff"),
+        "error must mention expected pin, got: {err}"
+    );
+    assert!(
+        err.contains(&peer.device_id),
+        "error must mention actual fingerprint, got: {err}"
+    );
+
+    Ok(())
+}
