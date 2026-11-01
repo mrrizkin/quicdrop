@@ -562,10 +562,10 @@ function renderPeers() {
                 ${item.trusted ? `<span title="Trusted">${icon("shield")}</span>` : ""}
               </span>
             </div>
+            <div class="peer-route" title="via ${esc(item.addr)}">via ${esc(item.addr)}</div>
             <div class="peer-row">
               <span class="peer-meta-left">
                 ${idElem}
-                <span class="peer-route" title="via ${esc(item.addr)}">via ${esc(item.addr)}</span>
                 ${platform}
               </span>
               <span class="peer-actions">

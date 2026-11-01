@@ -349,7 +349,7 @@ select {
 .peer-lines {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 1.5px;
   flex: 1;
   min-width: 0;
 }
@@ -461,10 +461,10 @@ select {
 }
 
 .peer-route {
-  flex: 0 1 auto;
-  min-width: 0;
+  width: 100%;
   font-family: var(--mono);
   font-size: 10px;
+  line-height: 1.25;
   color: var(--text-3);
   letter-spacing: 0.02em;
   overflow: hidden;
@@ -1392,7 +1392,11 @@ select.input {
 }
 
 [data-density="compact"] .peer {
-  padding-block: 4px;
+  padding-block: 3px;
+}
+
+[data-density="compact"] .peer-lines {
+  gap: 1px;
 }
 
 [data-density="compact"] .peer-section-head {
