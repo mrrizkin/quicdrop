@@ -62,18 +62,25 @@ function buildDevices(serverPeers = [], savedAddresses = [], savedRouteStates = 
         : savedRouteStates[saved.addr];
     const routeState = stateVal || "unknown";
     const label = saved.label || "";
+    const platform = saved.platform || "";
+    const declineLink = Boolean(saved.decline_link);
 
     if (!device) {
       device = {
         id: deviceId || saved.addr,
         device_id: deviceId,
         name: label || saved.addr,
-        platform: "",
+        platform,
         label,
         trusted: false,
         routes: [],
+        decline_link: declineLink,
       };
       deviceMap.set(key, device);
+    } else {
+      if (platform && !device.platform) device.platform = platform;
+      if (label && !device.label) device.label = label;
+      if (declineLink) device.decline_link = true;
     }
 
     device.routes.push({
@@ -82,6 +89,9 @@ function buildDevices(serverPeers = [], savedAddresses = [], savedRouteStates = 
       state: routeState,
       last_seen: 0,
       label,
+      device_id: deviceId,
+      platform,
+      decline_link: declineLink,
     });
   }
 
@@ -107,15 +117,16 @@ function assignRouteSections(devices = []) {
       const key = routeKey(device, route);
       const item = {
         key,
-        device_id: device.device_id,
+        device_id: device.device_id || route.device_id || "",
         name: device.name,
         label: route.label || device.label || "",
-        platform: device.platform || "",
+        platform: device.platform || route.platform || "",
         trusted: Boolean(device.trusted),
         addr: route.addr,
         origin: route.origin,
         state: route.state,
         manual: isManual,
+        decline_link: Boolean(route.decline_link || device.decline_link),
         device,
         route,
       };

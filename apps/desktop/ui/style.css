@@ -997,6 +997,11 @@ select {
   width: 420px;
 }
 
+.modal.link-modal,
+.modal.mismatch-modal {
+  width: 420px;
+}
+
 .field-note[data-error="1"] {
   color: var(--err);
 }

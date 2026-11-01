@@ -231,12 +231,18 @@ function updateSavedRouteLiveState(addr, routeState) {
 
 function seedSavedRouteStates(transfers) {
   if (!Array.isArray(transfers)) return;
+  for (const t of transfers) {
+    const targetAddr = t.peer_addr || t.peer_id;
+    if (targetAddr && t.captured_peer) {
+      lastCapturedForAddr.set(targetAddr, t.captured_peer);
+    }
+  }
   for (const saved of state.manual) {
     if (state.savedRouteStates[saved.addr]) continue;
     const recent = transfers.find(
       (t) =>
         t.direction === "out" &&
-        t.peer_id === saved.addr &&
+        (t.peer_addr === saved.addr || t.peer_id === saved.addr) &&
         (t.status === "done" || t.status === "failed"),
     );
     if (recent) {
@@ -245,18 +251,19 @@ function seedSavedRouteStates(transfers) {
   }
 }
 
-function manualPeer(addr, label = "") {
+function manualPeer(addr, label = "", device_id = "", platform = "", decline_link = false) {
   const clean = String(label || "").trim();
   return {
-    device_id: "",
+    device_id: device_id || "",
     name: clean || addr,
     label: clean,
-    platform: "",
+    platform: platform || "",
     addr,
     source: "address",
     trusted: false,
     manual: true,
     last_seen: 0,
+    decline_link: Boolean(decline_link),
   };
 }
 
@@ -279,7 +286,10 @@ function loadManualPeers() {
       const raw = typeof entry === "string" ? entry : entry?.addr;
       if (!raw) return null;
       const label = typeof entry === "string" ? "" : entry.label || "";
-      return manualPeer(withDefaultPort(raw, port), label);
+      const device_id = typeof entry === "string" ? "" : entry.device_id || "";
+      const platform = typeof entry === "string" ? "" : entry.platform || "";
+      const decline_link = typeof entry === "string" ? false : Boolean(entry.decline_link);
+      return manualPeer(withDefaultPort(raw, port), label, device_id, platform, decline_link);
     })
     .filter(Boolean);
   saveManualPrefs();
@@ -287,8 +297,40 @@ function loadManualPeers() {
 }
 
 function saveManualPrefs() {
-  prefs.addresses = state.manual.map((peer) => ({ addr: peer.addr, label: peer.label || "" }));
+  prefs.addresses = state.manual.map((peer) => ({
+    addr: peer.addr,
+    label: peer.label || "",
+    device_id: peer.device_id || "",
+    platform: peer.platform || "",
+    decline_link: Boolean(peer.decline_link),
+  }));
   savePrefs();
+}
+
+function linkManualPeer(addr, device_id, platform, label) {
+  const peer = state.manual.find((p) => p.addr === addr);
+  if (peer) {
+    peer.device_id = device_id || "";
+    if (platform) peer.platform = platform;
+    if (label !== undefined) {
+      peer.label = label;
+      peer.name = label || addr;
+    }
+    peer.decline_link = false;
+    saveManualPrefs();
+    recomputeDevices();
+    renderPeers();
+  }
+}
+
+function declineLinkManualPeer(addr) {
+  const peer = state.manual.find((p) => p.addr === addr);
+  if (peer) {
+    peer.decline_link = true;
+    saveManualPrefs();
+    recomputeDevices();
+    renderPeers();
+  }
 }
 
 /* Discovered peers and saved addresses coexist as independent routes. */
@@ -560,6 +602,7 @@ function renderPeers() {
                 ${platform}
               </span>
               <span class="peer-actions">
+                ${item.manual && !item.device_id ? `<button class="icon-btn peer-action" data-link="${esc(item.addr)}" title="Link device">${icon("link")}</button>` : ""}
                 ${item.manual ? `<button class="icon-btn peer-action" data-remove="${esc(item.addr)}" title="Remove">${icon("trash")}</button>` : ""}
                 <button class="icon-btn peer-action" data-send-files="${esc(item.key)}" title="Send files">${icon("upload")}</button>
                 <button class="icon-btn peer-action" data-send-folders="${esc(item.key)}" title="Send folders">${icon("folder")}</button>
@@ -574,7 +617,12 @@ function renderPeers() {
 
   list.querySelectorAll(".peer").forEach((row) => {
     row.addEventListener("click", (event) => {
-      if (event.target.closest("[data-send-files]") || event.target.closest("[data-send-folders]") || event.target.closest("[data-remove]")) return;
+      if (
+        event.target.closest("[data-send-files]") ||
+        event.target.closest("[data-send-folders]") ||
+        event.target.closest("[data-remove]") ||
+        event.target.closest("[data-link]")
+      ) return;
       selectPeer(row.dataset.key);
     });
     row.addEventListener("keydown", (event) => {
@@ -589,6 +637,12 @@ function renderPeers() {
     button.addEventListener("click", (event) => {
       event.stopPropagation();
       removeManualPeer(button.dataset.remove);
+    });
+  });
+  list.querySelectorAll("[data-link]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      openManualLink(button.dataset.link);
     });
   });
   list.querySelectorAll("[data-send-files]").forEach((button) => {
@@ -1154,10 +1208,11 @@ async function sendFolderToSelected() {
   await sendFoldersToPeer(peer);
 }
 
-async function sendToTarget(to, name, paths, message) {
+async function sendToTarget(to, name, paths, message, deviceId) {
   try {
     await api("POST", "/api/send", {
       to,
+      device_id: deviceId || undefined,
       peer_name: name,
       paths,
       concurrency: 8,
@@ -1180,8 +1235,11 @@ async function sendPaths(peer, paths, message) {
     paths,
     message ||
       (peer.manual
-        ? `Sending to ${peer.name}…`
+        ? (peer.device_id
+            ? `Sending to ${peer.name} (${shortId(peer.device_id)})…`
+            : `Sending to ${peer.name}…`)
         : `Sending to ${peer.name} (${shortId(peer.device_id)})…`),
+    peer.device_id || undefined,
   );
 }
 
@@ -1432,6 +1490,134 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     $("settings-modal").hidden = true;
     $("add-modal").hidden = true;
+    closeLinkModal();
+    closeMismatchModal();
+  }
+});
+
+let currentLinkAddr = null;
+let currentLinkCap = null;
+let currentMismatch = null;
+const lastCapturedForAddr = new Map();
+const promptedTransfers = new Set();
+
+function openLinkModal(saved, cap) {
+  currentLinkAddr = saved.addr;
+  currentLinkCap = cap;
+  $("link-addr-dim").textContent = saved.addr;
+  $("link-fingerprint").value = shortId(cap.device_id);
+  $("link-fingerprint").title = cap.device_id;
+  $("link-platform").value = cap.platform || "unknown";
+  $("link-label").value = saved.label || cap.name || "";
+  $("link-modal").hidden = false;
+  $("link-label").focus();
+}
+
+function closeLinkModal() {
+  $("link-modal").hidden = true;
+  currentLinkAddr = null;
+  currentLinkCap = null;
+}
+
+function openManualLink(addr) {
+  const saved = state.manual.find((p) => p.addr === addr);
+  if (!saved) return;
+  let cap = lastCapturedForAddr.get(addr);
+  if (!cap) {
+    const past = state.transfers.find(
+      (t) => (t.peer_addr === addr || t.peer_id === addr) && t.captured_peer,
+    );
+    if (past) {
+      cap = past.captured_peer;
+      lastCapturedForAddr.set(addr, cap);
+    }
+  }
+  if (cap) {
+    openLinkModal(saved, cap);
+  } else {
+    toast(`Send files to ${addr} first to capture and verify its identity.`);
+  }
+}
+
+function handleIdentityMismatch(t) {
+  const targetAddr = t.peer_addr || t.peer_id;
+  let actual = "";
+  let expected = "";
+  const m1 = (t.error || "").match(
+    /device id mismatch: peer certificate is ([a-f0-9]+), expected ([a-f0-9]+)/i,
+  );
+  if (m1) {
+    actual = m1[1];
+    expected = m1[2];
+  } else {
+    const m2 = (t.error || "").match(
+      /device id mismatch: peer reported device id ([a-f0-9]+) does not match certificate fingerprint ([a-f0-9]+)/i,
+    );
+    if (m2) {
+      actual = m2[1];
+      expected = m2[2];
+    } else {
+      actual = "unknown";
+      expected = "pinned";
+    }
+  }
+  currentMismatch = {
+    addr: targetAddr,
+    actual,
+    expected,
+    platform: t.captured_peer?.platform || "",
+    name: t.captured_peer?.name || "",
+  };
+  openMismatchModal(currentMismatch);
+}
+
+function openMismatchModal(m) {
+  $("mismatch-addr-dim").textContent = m.addr;
+  $("mismatch-addr").textContent = m.addr;
+  $("mismatch-expected").textContent = shortId(m.expected);
+  $("mismatch-expected").title = m.expected;
+  $("mismatch-actual").textContent = shortId(m.actual);
+  $("mismatch-actual").title = m.actual;
+  $("mismatch-message").textContent = `The address at ${m.addr} returned certificate for device ${shortId(m.actual)} instead of pinned device ${shortId(m.expected)}.`;
+  $("mismatch-modal").hidden = false;
+}
+
+function closeMismatchModal() {
+  $("mismatch-modal").hidden = true;
+  currentMismatch = null;
+}
+
+$("link-close").addEventListener("click", closeLinkModal);
+$("link-decline").addEventListener("click", () => {
+  if (currentLinkAddr) declineLinkManualPeer(currentLinkAddr);
+  closeLinkModal();
+});
+$("link-confirm").addEventListener("click", () => {
+  if (currentLinkAddr && currentLinkCap) {
+    linkManualPeer(
+      currentLinkAddr,
+      currentLinkCap.device_id,
+      currentLinkCap.platform,
+      $("link-label").value.trim(),
+    );
+    toast(`Linked ${shortId(currentLinkCap.device_id)} to ${currentLinkAddr}`);
+  }
+  closeLinkModal();
+});
+
+$("mismatch-close").addEventListener("click", closeMismatchModal);
+$("mismatch-dismiss").addEventListener("click", closeMismatchModal);
+$("mismatch-relink").addEventListener("click", () => {
+  if (!currentMismatch || currentMismatch.actual === "unknown") return;
+  const confirmed = window.confirm(
+    `Are you sure you want to re-link ${currentMismatch.addr} to device ${shortId(currentMismatch.actual)}?\n\nOnly proceed if you know the certificate was intentionally regenerated.`,
+  );
+  if (confirmed) {
+    const saved = state.manual.find((p) => p.addr === currentMismatch.addr);
+    const label = saved ? saved.label : undefined;
+    linkManualPeer(currentMismatch.addr, currentMismatch.actual, currentMismatch.platform, label);
+    toast(`Re-linked ${currentMismatch.addr} to ${shortId(currentMismatch.actual)}`);
+    closeMismatchModal();
   }
 });
 
@@ -1463,12 +1649,29 @@ async function handleEvent(payload) {
       upsertTransfer(payload.transfer);
       markTransferDirty(payload.transfer.id, true);
       const t = payload.transfer;
-      if (t.direction === "out" && t.peer_id && state.manual.some((p) => p.addr === t.peer_id)) {
+      const targetAddr = t.peer_addr || t.peer_id;
+      if (t.direction === "out" && targetAddr && state.manual.some((p) => p.addr === targetAddr)) {
         if (t.status === "done") {
-          updateSavedRouteLiveState(t.peer_id, "live");
+          updateSavedRouteLiveState(targetAddr, "live");
         } else if (t.status === "failed") {
-          updateSavedRouteLiveState(t.peer_id, "lost");
+          updateSavedRouteLiveState(targetAddr, "lost");
         }
+      }
+      if (t.direction === "out" && t.captured_peer && targetAddr) {
+        lastCapturedForAddr.set(targetAddr, t.captured_peer);
+        const saved = state.manual.find((p) => p.addr === targetAddr);
+        if (saved && !saved.device_id && !saved.decline_link && !promptedTransfers.has(t.id)) {
+          promptedTransfers.add(t.id);
+          openLinkModal(saved, t.captured_peer);
+        }
+      }
+      if (
+        t.direction === "out" &&
+        t.status === "failed" &&
+        t.error &&
+        t.error.includes("device id mismatch")
+      ) {
+        handleIdentityMismatch(t);
       }
       if (prefs.openAfter && t.direction === "in" && t.status === "done" && before?.status !== "done") {
         invoke("open_path", { path: state.config.out_dir }).catch(() => {});

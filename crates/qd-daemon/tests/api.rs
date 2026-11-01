@@ -186,6 +186,15 @@ async fn api_roundtrip() -> Result<()> {
     assert!(duration_ms >= 1);
     let expected_bps = transferred * 1000 / duration_ms;
     assert_eq!(avg_bps, expected_bps);
+    assert_eq!(transfer["peer_addr"], format!("127.0.0.1:{recv_port}"));
+    assert!(
+        transfer["captured_peer"].is_object(),
+        "captured_peer must be present: {transfer}"
+    );
+    let captured_id = transfer["captured_peer"]["device_id"]
+        .as_str()
+        .expect("captured device_id");
+    assert!(!captured_id.is_empty());
     assert_eq!(
         std::fs::read(recv_out.join("hello.txt"))?,
         b"driven over http\n"
@@ -232,6 +241,48 @@ async fn api_roundtrip() -> Result<()> {
     assert_eq!(empty_transfer["transferred"], 0);
     assert!(empty_transfer["duration_ms"].is_number());
     assert!(empty_transfer["avg_bps"].is_null());
+
+    // --- pin mismatch transfer over API -----------------------------------
+    let bad_job: Value = http
+        .post(format!("{base}/api/send"))
+        .bearer_auth("test-token")
+        .json(&json!({
+            "to": format!("127.0.0.1:{recv_port}"),
+            "device_id": "9999999999999999",
+            "paths": [src],
+        }))
+        .send()
+        .await?
+        .json()
+        .await?;
+    let bad_id = bad_job["id"].as_str().expect("bad job id").to_string();
+    let mut bad_transfer = Value::Null;
+    for _ in 0..100 {
+        let list: Vec<Value> = http
+            .get(format!("{base}/api/transfers?limit=10"))
+            .bearer_auth("test-token")
+            .send()
+            .await?
+            .json()
+            .await?;
+        if let Some(found) = list.into_iter().find(|t| t["id"] == bad_id.as_str()) {
+            let status = found["status"].as_str().unwrap_or("").to_string();
+            bad_transfer = found;
+            if status != "active" {
+                break;
+            }
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        bad_transfer["status"], "failed",
+        "bad_transfer: {bad_transfer}"
+    );
+    let err = bad_transfer["error"].as_str().unwrap_or("");
+    assert!(
+        err.contains("device id mismatch"),
+        "error must mention mismatch: {err}"
+    );
 
     // --- shutdown ---------------------------------------------------------
     http.post(format!("{base}/api/shutdown"))

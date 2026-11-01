@@ -22,6 +22,15 @@ use crate::util::{human_bytes, human_rate};
 /// Pieces of one chunk buffered ahead of the wire.
 const READ_AHEAD: usize = 2;
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CapturedPeer {
+    pub device_id: String,
+    pub name: String,
+    pub platform: String,
+}
+
+pub type HandshakeSink = Arc<dyn Fn(&CapturedPeer) + Send + Sync>;
+
 #[derive(Clone)]
 pub struct SendOpts {
     pub addr: SocketAddr,
@@ -48,6 +57,10 @@ pub struct SendOpts {
     /// Optional hook called once the receiver approves the transfer and data begins.
     /// Runs synchronously on the send task; must not block.
     pub on_start: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Optional slot to receive verified peer identity captured during handshake.
+    pub captured_peer: Option<Arc<std::sync::Mutex<Option<CapturedPeer>>>>,
+    /// Optional callback invoked as soon as peer identity is verified during handshake.
+    pub on_handshake: Option<HandshakeSink>,
 }
 
 impl Default for SendOpts {
@@ -66,6 +79,8 @@ impl Default for SendOpts {
             identity: None,
             sources: None,
             on_start: None,
+            captured_peer: None,
+            on_handshake: None,
         }
     }
 }
@@ -85,6 +100,8 @@ impl std::fmt::Debug for SendOpts {
             .field("identity", &self.identity.is_some())
             .field("sources", &self.sources.as_ref().map(Vec::len))
             .field("on_start", &self.on_start.is_some())
+            .field("captured_peer", &self.captured_peer.is_some())
+            .field("on_handshake", &self.on_handshake.is_some())
             .finish()
     }
 }
@@ -96,6 +113,7 @@ pub struct Summary {
     pub failed: usize,
     pub bytes: u64,
     pub duration: Duration,
+    pub peer: Option<CapturedPeer>,
 }
 
 /// Result of the background hash, including the failure case.
@@ -135,7 +153,9 @@ pub async fn send(opts: SendOpts) -> Result<Summary> {
     }
     proto::validate_offer(&metas)?;
 
-    let client_cfg = crate::net::client_config(opts.device_id.clone())?;
+    let cert_slot = Arc::new(std::sync::Mutex::new(None));
+    let client_cfg =
+        crate::net::client_config_with_captured(opts.device_id.clone(), Some(cert_slot.clone()))?;
     let endpoint = crate::net::client_endpoint(client_cfg)?;
 
     let connecting = endpoint
@@ -149,7 +169,22 @@ pub async fn send(opts: SendOpts) -> Result<Summary> {
             opts.addr,
             opts.addr.port()
         ),
-        Err(e) => bail!("handshake with {} failed: {e}", opts.addr),
+        Err(e) => {
+            if let Some(expected) = opts.device_id.as_deref().filter(|e| !e.is_empty()) {
+                if let Some(actual) = cert_slot.lock().ok().and_then(|s| s.clone()) {
+                    if !actual.starts_with(expected) {
+                        bail!(
+                            "device id mismatch: peer certificate is {actual}, expected {expected}"
+                        );
+                    }
+                }
+            }
+            let err_str = e.to_string();
+            if err_str.contains("device id mismatch") {
+                bail!("{err_str}");
+            }
+            bail!("handshake with {} failed: {e}", opts.addr);
+        }
     };
     debug!("connected to {} in one RTT", conn.remote_address());
 
@@ -187,15 +222,47 @@ pub async fn send(opts: SendOpts) -> Result<Summary> {
     .await?;
 
     let peer_hello: Frame = proto::read_msg(&mut ctrl_recv).await?;
-    let peer_name = match peer_hello {
-        Frame::Hello { name, version, .. } => {
+    let (peer_name, peer_platform) = match peer_hello {
+        Frame::Hello {
+            name,
+            version,
+            device_id,
+            platform,
+        } => {
             if version != proto::PROTO_VERSION {
                 bail!(
                     "peer speaks protocol v{version}, we speak v{}",
                     proto::PROTO_VERSION
                 );
             }
-            name
+            let cert_fingerprint = cert_slot
+                .lock()
+                .ok()
+                .and_then(|s| s.clone())
+                .unwrap_or_default();
+            if !cert_fingerprint.is_empty() && device_id != cert_fingerprint {
+                bail!(
+                    "device id mismatch: peer reported device id {device_id} does not match certificate fingerprint {cert_fingerprint}"
+                );
+            }
+            let captured = CapturedPeer {
+                device_id: if cert_fingerprint.is_empty() {
+                    device_id
+                } else {
+                    cert_fingerprint
+                },
+                name: name.clone(),
+                platform: platform.clone(),
+            };
+            if let Some(slot) = &opts.captured_peer {
+                if let Ok(mut lock) = slot.lock() {
+                    *lock = Some(captured.clone());
+                }
+            }
+            if let Some(on_handshake) = &opts.on_handshake {
+                on_handshake(&captured);
+            }
+            (name, platform)
         }
         Frame::Error { message } => bail!("peer error: {message}"),
         other => bail!("unexpected reply: {other:?}"),
@@ -383,6 +450,12 @@ pub async fn send(opts: SendOpts) -> Result<Summary> {
 
     endpoint.wait_idle().await;
     conn.close(0u32.into(), b"done");
+    let fp = cert_slot.lock().ok().and_then(|s| s.clone());
+    summary.peer = fp.map(|device_id| CapturedPeer {
+        device_id,
+        name: peer_name,
+        platform: peer_platform,
+    });
     Ok(summary)
 }
 

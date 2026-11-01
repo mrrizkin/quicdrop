@@ -131,12 +131,21 @@ impl PeerView {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CapturedPeerInfo {
+    pub device_id: String,
+    pub name: String,
+    pub platform: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransferView {
     pub id: String,
     pub direction: Direction,
     pub peer_id: String,
     pub peer_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peer_addr: Option<String>,
     pub files: Vec<FileView>,
     pub total_bytes: u64,
     pub transferred: u64,
@@ -146,6 +155,8 @@ pub struct TransferView {
     pub finished_at: Option<u64>,
     pub duration_ms: Option<u64>,
     pub avg_bps: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub captured_peer: Option<CapturedPeerInfo>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -384,6 +395,7 @@ impl Inner {
         direction: Direction,
         peer_id: &str,
         peer_name: &str,
+        peer_addr: Option<String>,
         files: Vec<FileView>,
         total_bytes: u64,
     ) -> String {
@@ -392,6 +404,7 @@ impl Inner {
             direction,
             peer_id: peer_id.to_string(),
             peer_name: peer_name.to_string(),
+            peer_addr,
             files,
             total_bytes,
             transferred: 0,
@@ -401,6 +414,7 @@ impl Inner {
             finished_at: None,
             duration_ms: None,
             avg_bps: None,
+            captured_peer: None,
         };
         if let Ok(mut transfers) = self.transfers.lock() {
             transfers.push(view.clone());
@@ -496,6 +510,21 @@ impl Inner {
             if transfer.finished_at.is_none() {
                 transfer.finished_at = Some(now_secs());
             }
+            transfer.clone()
+        };
+        self.broadcast(DaemonEvent::Session { transfer: view });
+    }
+
+    fn set_captured_peer(&self, id: &str, captured: CapturedPeerInfo) {
+        let view = {
+            let Ok(mut transfers) = self.transfers.lock() else {
+                return;
+            };
+            let Some(transfer) = transfers.iter_mut().find(|t| t.id == id) else {
+                return;
+            };
+            transfer.peer_id = captured.device_id.clone();
+            transfer.captured_peer = Some(captured);
             transfer.clone()
         };
         self.broadcast(DaemonEvent::Session { transfer: view });
@@ -817,7 +846,14 @@ fn server_event_sink(inner: Arc<Inner>) -> ServerEventSink {
                     ok: None,
                 })
                 .collect();
-            let id = inner.start_transfer(Direction::In, &peer_id, &peer_name, files, total_bytes);
+            let id = inner.start_transfer(
+                Direction::In,
+                &peer_id,
+                &peer_name,
+                None,
+                files,
+                total_bytes,
+            );
             inner.mark_transfer_started(&id);
             if let Ok(mut inbound) = inner.inbound.lock() {
                 inbound.insert((peer_id.clone(), session), id.clone());
@@ -917,7 +953,7 @@ fn server_event_sink(inner: Arc<Inner>) -> ServerEventSink {
             peer_name,
             reason,
         } => {
-            let id = inner.start_transfer(Direction::In, &peer_id, &peer_name, Vec::new(), 0);
+            let id = inner.start_transfer(Direction::In, &peer_id, &peer_name, None, Vec::new(), 0);
             inner.finish_transfer(&id, TransferStatus::Declined, Some(reason), None);
         }
     })
@@ -1080,6 +1116,7 @@ pub async fn resolve_target(
 pub async fn spawn_send(
     inner: Arc<Inner>,
     to: String,
+    device_id: Option<String>,
     peer_name: Option<String>,
     paths: Vec<PathBuf>,
     concurrency: usize,
@@ -1105,7 +1142,7 @@ pub async fn spawn_send(
     let total: u64 = files.iter().map(|f| f.size).sum();
     // `to` may be a device id; keep the human name for the transfer list.
     let label = peer_name.clone().unwrap_or_else(|| to.clone());
-    let id = inner.start_transfer(Direction::Out, &to, &label, files, total);
+    let id = inner.start_transfer(Direction::Out, &to, &label, Some(to.clone()), files, total);
 
     let state = inner.clone();
     let transfer_id = id.clone();
@@ -1120,7 +1157,7 @@ pub async fn spawn_send(
             return;
         }
         let result = resolve_target(&state, &to, timeout).await;
-        let (addr, device_id, label) = match result {
+        let (addr, resolved_device_id, label) = match result {
             Ok(target) => target,
             Err(e) => {
                 state.finish_transfer(
@@ -1132,6 +1169,8 @@ pub async fn spawn_send(
                 return;
             }
         };
+
+        let pin_device_id = device_id.or(resolved_device_id);
 
         let sink_state = state.clone();
         let sink_id = transfer_id.clone();
@@ -1160,9 +1199,24 @@ pub async fn spawn_send(
             start_state.mark_transfer_started(&start_id);
         });
 
+        let captured_slot: Arc<Mutex<Option<qd_core::client::CapturedPeer>>> =
+            Arc::new(Mutex::new(None));
+        let captured_state = state.clone();
+        let captured_tid = transfer_id.clone();
+        let on_handshake = Arc::new(move |peer: &qd_core::client::CapturedPeer| {
+            captured_state.set_captured_peer(
+                &captured_tid,
+                CapturedPeerInfo {
+                    device_id: peer.device_id.clone(),
+                    name: peer.name.clone(),
+                    platform: peer.platform.clone(),
+                },
+            );
+        });
+
         let opts = SendOpts {
             addr,
-            device_id,
+            device_id: pin_device_id,
             files: Vec::new(),
             concurrency: concurrency.max(1),
             quiet: true,
@@ -1174,10 +1228,25 @@ pub async fn spawn_send(
             identity: Some(state.identity.clone()),
             sources: Some(sources),
             on_start: Some(on_start),
+            captured_peer: Some(captured_slot.clone()),
+            on_handshake: Some(on_handshake),
         };
         debug!("sending to {label} at {addr}");
         match client::send(opts).await {
             Ok(summary) => {
+                if let Some(captured) = summary
+                    .peer
+                    .or_else(|| captured_slot.lock().ok().and_then(|s| s.clone()))
+                {
+                    state.set_captured_peer(
+                        &transfer_id,
+                        CapturedPeerInfo {
+                            device_id: captured.device_id,
+                            name: captured.name,
+                            platform: captured.platform,
+                        },
+                    );
+                }
                 let status = if cancel.is_cancelled() {
                     TransferStatus::Cancelled
                 } else if summary.failed > 0 {
@@ -1204,6 +1273,16 @@ pub async fn spawn_send(
                 );
             }
             Err(e) => {
+                if let Some(captured) = captured_slot.lock().ok().and_then(|s| s.clone()) {
+                    state.set_captured_peer(
+                        &transfer_id,
+                        CapturedPeerInfo {
+                            device_id: captured.device_id,
+                            name: captured.name,
+                            platform: captured.platform,
+                        },
+                    );
+                }
                 let status = if cancel.is_cancelled() {
                     TransferStatus::Cancelled
                 } else {
@@ -1450,7 +1529,7 @@ mod tests {
     #[test]
     fn late_progress_after_done_does_not_leak_or_rewrite_timing() {
         let (inner, _dir) = test_inner();
-        let id = inner.start_transfer(Direction::Out, "peer-1", "Peer 1", Vec::new(), 1000);
+        let id = inner.start_transfer(Direction::Out, "peer-1", "Peer 1", None, Vec::new(), 1000);
         inner.mark_transfer_started(&id);
         inner.progress(&id, 500, 1000);
         inner.finish_transfer(
@@ -1478,7 +1557,7 @@ mod tests {
     #[test]
     fn cancelled_transfer_keeps_first_timing() {
         let (inner, _dir) = test_inner();
-        let id = inner.start_transfer(Direction::In, "peer-2", "Peer 2", Vec::new(), 2000);
+        let id = inner.start_transfer(Direction::In, "peer-2", "Peer 2", None, Vec::new(), 2000);
         inner.mark_transfer_started(&id);
         inner.progress(&id, 400, 2000);
         inner.finish_transfer(
@@ -1510,7 +1589,7 @@ mod tests {
     fn failed_transfer_records_partial_timing_and_no_avg_if_empty() {
         let (inner, _dir) = test_inner();
         // Failed with bytes transferred
-        let id1 = inner.start_transfer(Direction::Out, "peer-3", "Peer 3", Vec::new(), 1000);
+        let id1 = inner.start_transfer(Direction::Out, "peer-3", "Peer 3", None, Vec::new(), 1000);
         inner.mark_transfer_started(&id1);
         inner.progress(&id1, 200, 1000);
         inner.finish_transfer(
@@ -1529,7 +1608,7 @@ mod tests {
         assert_eq!(t1.avg_bps, Some(200 * 1000 / 100));
 
         // Failed with 0 bytes transferred
-        let id2 = inner.start_transfer(Direction::Out, "peer-4", "Peer 4", Vec::new(), 1000);
+        let id2 = inner.start_transfer(Direction::Out, "peer-4", "Peer 4", None, Vec::new(), 1000);
         inner.finish_transfer(
             &id2,
             TransferStatus::Failed,

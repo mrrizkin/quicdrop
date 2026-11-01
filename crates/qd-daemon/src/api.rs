@@ -101,6 +101,9 @@ struct Respond {
 struct SendRequest {
     /// Peer name, device id prefix, hostname, `ip:port`, or an address.
     to: String,
+    /// Pinned device id of the receiver (prefix allowed).
+    #[serde(default)]
+    device_id: Option<String>,
     /// Display name for the transfer list when `to` is a device id.
     #[serde(default)]
     peer_name: Option<String>,
@@ -283,6 +286,7 @@ async fn send(
     let id = spawn_send(
         inner,
         body.to,
+        body.device_id,
         body.peer_name,
         body.paths,
         concurrency,

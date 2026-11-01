@@ -184,9 +184,19 @@ pub fn server_config(identity: &Identity) -> Result<quinn::ServerConfig> {
 /// Client config that only accepts a certificate matching `expected_device_id` (prefix
 /// allowed so users can pass a short id).
 pub fn client_config(expected_device_id: Option<String>) -> Result<quinn::ClientConfig> {
+    client_config_with_captured(expected_device_id, None)
+}
+
+/// Client config that captures the peer certificate fingerprint into `captured_fingerprint`
+/// and only accepts a certificate matching `expected_device_id`.
+pub fn client_config_with_captured(
+    expected_device_id: Option<String>,
+    captured_fingerprint: Option<Arc<std::sync::Mutex<Option<String>>>>,
+) -> Result<quinn::ClientConfig> {
     let provider = provider();
     let verifier = Arc::new(PinnedVerifier {
         expected: expected_device_id,
+        captured: captured_fingerprint,
         provider: provider.clone(),
     });
 
@@ -208,6 +218,7 @@ pub fn client_config(expected_device_id: Option<String>) -> Result<quinn::Client
 #[derive(Debug)]
 struct PinnedVerifier {
     expected: Option<String>,
+    captured: Option<Arc<std::sync::Mutex<Option<String>>>>,
     provider: Arc<CryptoProvider>,
 }
 
@@ -221,6 +232,11 @@ impl ServerCertVerifier for PinnedVerifier {
         _now: UnixTime,
     ) -> Result<ServerCertVerified, TlsError> {
         let fingerprint = Identity::fingerprint(end_entity.as_ref());
+        if let Some(captured) = &self.captured {
+            if let Ok(mut slot) = captured.lock() {
+                *slot = Some(fingerprint.clone());
+            }
+        }
         if let Some(expected) = self.expected.as_deref().filter(|e| !e.is_empty()) {
             if !fingerprint.starts_with(expected) {
                 return Err(TlsError::General(format!(

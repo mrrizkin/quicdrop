@@ -28,6 +28,7 @@
       <symbol id="i-inbox" viewBox="0 0 24 24"><path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.5 5.1L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.5-6.9A2 2 0 0 0 16.7 4H7.3a2 2 0 0 0-1.8 1.1z"/></symbol>
       <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></symbol>
       <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+      <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></symbol>
     </svg>
 
     <div class="drop-overlay" id="drop-overlay">
@@ -283,6 +284,76 @@
           <span class="grow"></span>
           <button class="btn" id="settings-cancel">Close</button>
           <button class="btn primary" id="settings-save">Save</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-backdrop" id="link-modal" hidden>
+      <div class="modal link-modal">
+        <div class="modal-head">
+          <svg class="i"><use href="#i-link"/></svg>
+          <div class="modal-title">
+            <strong>Link device identity</strong>
+            <span class="dim" id="link-addr-dim"></span>
+          </div>
+          <button class="icon-btn" type="button" id="link-close" title="Close" aria-label="Close">
+            <svg class="i"><use href="#i-x"/></svg>
+          </button>
+        </div>
+        <div class="modal-body">
+          <p class="field-note" style="margin-bottom:12px">
+            Pin this device's verified certificate fingerprint for future transfers to this address.
+          </p>
+          <label class="field">
+            <span>Device fingerprint</span>
+            <input class="input mono" id="link-fingerprint" type="text" readonly />
+          </label>
+          <label class="field">
+            <span>Platform</span>
+            <input class="input" id="link-platform" type="text" readonly />
+          </label>
+          <label class="field">
+            <span>Display label</span>
+            <input class="input" id="link-label" type="text" maxlength="48" spellcheck="false" />
+          </label>
+        </div>
+        <div class="modal-foot">
+          <span class="grow"></span>
+          <button class="btn" type="button" id="link-decline">Not now</button>
+          <button class="btn primary" type="button" id="link-confirm">Link device</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-backdrop" id="mismatch-modal" hidden>
+      <div class="modal mismatch-modal">
+        <div class="modal-head">
+          <svg class="i" style="color:var(--err)"><use href="#i-alert"/></svg>
+          <div class="modal-title">
+            <strong style="color:var(--err)">Identity Mismatch</strong>
+            <span class="dim" id="mismatch-addr-dim"></span>
+          </div>
+          <button class="icon-btn" type="button" id="mismatch-close" title="Close" aria-label="Close">
+            <svg class="i"><use href="#i-x"/></svg>
+          </button>
+        </div>
+        <div class="modal-body">
+          <p class="field-note" id="mismatch-message" style="margin-bottom:12px;color:var(--text)">
+            The device at this address presented a certificate for a different device than pinned.
+          </p>
+          <div class="kv">
+            <span>Address</span><code id="mismatch-addr">—</code>
+            <span>Pinned id</span><code id="mismatch-expected">—</code>
+            <span>Received id</span><code id="mismatch-actual" style="color:var(--err)">—</code>
+          </div>
+          <p class="field-note" id="mismatch-warning" style="margin-top:12px">
+            This could mean a different device is listening on this address, or the peer's certificate changed. Only re-link if you trust this change.
+          </p>
+        </div>
+        <div class="modal-foot">
+          <span class="grow"></span>
+          <button class="btn" type="button" id="mismatch-dismiss">Dismiss</button>
+          <button class="btn" type="button" id="mismatch-relink" style="color:var(--err);border-color:var(--err)">Re-link device</button>
         </div>
       </div>
     </div>
