@@ -20,7 +20,11 @@ lint:
 test:
     cargo test --workspace
 
-verify: fmt-check lint test
+# Flatpak vendored crates must track the desktop lockfile.
+check-flatpak:
+    python3 scripts/check-flatpak-sources.py
+
+verify: fmt-check lint test check-flatpak
 
 # Next release tag for the current UTC ISO week.
 next-version:
