@@ -1,0 +1,75 @@
+name: Bug report
+description: Something does not work as documented.
+title: "[bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Please remove device ids, keys and file contents from logs
+        before pasting them.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `qd --version`, or the release tag for a packaged build.
+      placeholder: "2026.44.15"
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Linux
+        - macOS
+        - Windows
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - qd CLI
+        - quicdropd
+        - Desktop app
+        - Discovery
+        - Packaging
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Commands, the exact `--to` value, and whether the peer was on the same link.
+      placeholder: |
+        1. qd receive
+        2. qd send photos --to laptop
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant output. `RUST_LOG=debug` adds detail.
+      render: shell
+    validations:
+      required: false
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched the existing issues.
+          required: true
+        - label: I removed keys, tokens and other private data from this report.
+          required: true
